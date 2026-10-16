@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  scripts:
+    name: Scripts on Python ${{ matrix.python }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.8", "3.x"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Compile both scripts
+        run: python -m py_compile k8s.py disks.py
+      - name: k8s.py prints its help and version
+        run: |
+          python k8s.py --help
+          python k8s.py --version
+      - name: k8s.py writes a report when it can't reach a cluster
+        run: |
+          python k8s.py --context no-such-context --no-prices --sample-minutes 0 --out "$RUNNER_TEMP/report/"
+          python -c "import glob, zipfile; [f] = glob.glob('$RUNNER_TEMP/report/*.xlsx'); assert zipfile.ZipFile(f).testzip() is None"
+      - name: disks.py stops with a clear message when az is missing
+        run: |
+          if PATH="$(dirname "$(command -v python)")" python disks.py < /dev/null > disks.out; then exit 1; fi
+          cat disks.out
+          grep -q "This needs the Azure CLI" disks.out
+
+  ruff:
+    name: Ruff
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Lint
+        run: pipx run --spec ruff==0.16.10 ruff check --output-format=github .

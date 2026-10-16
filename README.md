@@ -5,6 +5,7 @@ Zoorik's free assessments for Coral (Kubernetes) and Amoeba (Azure block storage
 - [Kubernetes: `k8s.py`](#kubernetes-k8spy) covers AKS, EKS, or any cluster kubectl can reach.
 - [Azure disks: `disks.py`](#azure-disks-diskspy) covers the data disks of your Azure Linux VMs.
 - [Where the figures come from](#where-the-figures-come-from)
+- [Contributing](#contributing)
 
 Each script is one Python file. It needs Python 3.8 or later and uses only the standard library. Azure Cloud Shell and AWS CloudShell already have Python 3 and the CLIs the scripts call. Each `zoorik.com/assess/...` URL redirects to the file of the same name in this repo, so the code you read here is the code that runs.
 
@@ -339,3 +340,15 @@ When a figure can't be known, its cell is blank and the row says why. In the k8s
 The figures are estimates at list prices, not a quote.
 
 Questions: founders@zoorik.com.
+
+---
+
+## Contributing
+
+Contributions are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) explains how to run the scripts from a clone, how to add a check, a cloud or a region, and how to test a change. Issues labelled [good first issue](https://github.com/getzoorik/assessment/labels/good%20first%20issue) are a good place to start.
+
+This repo is public, so please don't paste a report or your account's names into an issue. To report a security problem, use **Report a vulnerability** on the Security tab, or e-mail founders@zoorik.com.
+
+## License
+
+Apache-2.0, see [LICENSE](LICENSE). Copyright 2026 Zoorik Private Limited.

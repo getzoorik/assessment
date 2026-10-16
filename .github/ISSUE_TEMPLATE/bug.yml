@@ -1,0 +1,63 @@
+name: Bug in a script
+description: k8s.py or disks.py stopped, did something wrong, or showed a wrong figure.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for telling us. This repo is public, so please don't attach your Excel report, and replace cluster, VM, subscription and account names with placeholders such as `cluster-a`. You can also e-mail the report to founders@zoorik.com.
+  - type: dropdown
+    id: script
+    attributes:
+      label: Script
+      options:
+        - k8s.py (Kubernetes)
+        - disks.py (Azure disks)
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Script version
+      description: 'The first line the script prints, such as "Zoorik Coral: Kubernetes assessment 1.0.0".'
+    validations:
+      required: true
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where you ran it
+      options:
+        - Azure Cloud Shell
+        - AWS CloudShell
+        - Linux
+        - macOS
+        - WSL
+        - Somewhere else
+    validations:
+      required: true
+  - type: input
+    id: tools
+    attributes:
+      label: Python and CLI versions
+      description: "The output of `python3 --version`, and of whichever the script used: `kubectl version --client`, `az version` or `aws --version`."
+  - type: textarea
+    id: command
+    attributes:
+      label: The line you ran
+      placeholder: curl -fsSL https://zoorik.com/assess/k8s | python3 - --context cluster-a
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened
+      description: The console output, with names replaced. If the problem is in the report, paste the text of its Status, Reason, Note or Price note column.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
