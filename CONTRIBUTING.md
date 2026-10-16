@@ -9,13 +9,13 @@ Each one reads a cloud account, estimates a saving and writes one Excel file. Th
 
 ## Before you start
 
-- **What is on `main` runs for everyone.** `zoorik.com/assess/k8s` and `zoorik.com/assess/disks` redirect to the files on `main`, so a merged change reaches the next person who pastes the line.
+- **What is on `main` runs for everyone.** `zoorik.com/assess/k8s` and `zoorik.com/assess/disks` redirect to the files on `main`, so a merged change reaches the next person who pastes the line. The `zoorik` package on PyPI gets it at the next release.
 - **Open an issue first** for anything bigger than a small fix, so we can agree on the approach before you write it.
 - **New here?** Issues labelled [good first issue](https://github.com/getzoorik/assessment/labels/good%20first%20issue) are small and say where to start.
 
 ## The rules the scripts follow
 
-- **One file, standard library only.** Each script is a single Python file that runs as `curl ... | python3 -`. No third-party packages, no extra files, nothing to `pip install`. It must run on Python 3.8 and later.
+- **One file, standard library only.** Each script is a single Python file that runs as `curl ... | python3 -`. No third-party packages, and a script never imports another file of this repo. It must run on Python 3.8 and later. The `zoorik` package ships the two files unchanged.
 - **Read only.** Apart from the two steps the README describes (`az aks command invoke` in k8s.py, and Azure Run Command after a yes in disks.py), the scripts only read. Don't add a call that changes anything in a cloud or a cluster.
 - **Send nothing.** No telemetry and no uploads. The only network calls go to the user's cloud, their clusters and public price lists.
 - **Keep only what the report needs.** k8s.py never reads Secrets or ConfigMaps, and never keeps env values, annotations or pod IPs. When you read something new, keep only the fields you use.
@@ -68,6 +68,10 @@ Both files are split into sections, each headed by a `# ----` line with its name
 - *report:* the `*_COLS` lists, the `*_rows` functions, `summary_rows` and `about_rows`.
 - *xlsx writer:* `write_xlsx` writes the file.
 
+**zoorik/**, the `zoorik` command for people who install the package:
+- `__main__.py` starts `k8s.py` or `disks.py`. The wheel ships both files inside the package (see `force-include` in `pyproject.toml`), so the package needs no copy of them.
+- `__init__.py` holds the package version.
+
 ## Add a check
 
 - **k8s.py, a new figure or column:** work it out in `build` or `estimate`. Then add the column to the right `*_COLS` list, and the value to its `*_rows` function at the same position.
@@ -101,6 +105,7 @@ python3 k8s.py --context no-such-context --no-prices --sample-minutes 0 --out /t
 
 - The last command reaches no cluster. It shows that a run still finishes, and writes a report, when a cluster can't be assessed.
 - CI also runs disks.py where `az` is missing, and checks that it stops with the message that asks for the Azure CLI.
+- CI also installs the package with `pip install .` and runs the same no-cluster report through `zoorik k8s`.
 - `ruff.toml` sets Python 3.8 as the target, so ruff also flags syntax that is newer than 3.8. If you use uv, `uv run --python 3.8 k8s.py --help` tries Python 3.8 locally.
 
 Then run your change for real, against a cluster or subscription you own, and open the report. Excel, LibreOffice and Google Sheets all open it. In the pull request, say what you ran and what changed in the report. Replace your own names, or run k8s.py with `--anonymize`. Never commit a report file: it names things in your account.
@@ -119,6 +124,14 @@ Then run your change for real, against a cluster or subscription you own, and op
 4. CI must pass. A maintainer reviews every pull request and merges it.
 
 By sending a pull request, you agree that your contribution is licensed under Apache-2.0, the license of this repo.
+
+## Releases
+
+Maintainers publish the `zoorik` package to PyPI:
+
+1. Bump `__version__` in `zoorik/__init__.py` in a pull request.
+2. Once it is merged, publish a GitHub release whose tag is `v` plus that version, such as `v1.0.1`.
+3. The release workflow checks that the tag matches the version, builds the package and installs it once. It publishes to PyPI after a maintainer approves the `pypi` environment. PyPI trusts this workflow directly (trusted publishing), so no PyPI token is stored anywhere.
 
 ## Security and conduct
 

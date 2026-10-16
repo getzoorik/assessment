@@ -9,6 +9,16 @@ Zoorik's free assessments for Coral (Kubernetes) and Amoeba (Azure block storage
 
 Each script is one Python file. It needs Python 3.8 or later and uses only the standard library. Azure Cloud Shell and AWS CloudShell already have Python 3 and the CLIs the scripts call. Each `zoorik.com/assess/...` URL redirects to the file of the same name in this repo, so the code you read here is the code that runs.
 
+The same two files are also on PyPI, as the `zoorik` package, for a command you install once:
+
+```bash
+pipx install zoorik    # or: pip install zoorik
+zoorik k8s             # runs k8s.py, with the same options
+zoorik disks           # runs disks.py
+```
+
+Each PyPI release is built from a release tag of this repo by its [release workflow](https://github.com/getzoorik/assessment/blob/main/.github/workflows/release.yaml).
+
 ---
 
 ## Kubernetes: k8s.py
@@ -345,10 +355,10 @@ Questions: founders@zoorik.com.
 
 ## Contributing
 
-Contributions are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) explains how to run the scripts from a clone, how to add a check, a cloud or a region, and how to test a change. Issues labelled [good first issue](https://github.com/getzoorik/assessment/labels/good%20first%20issue) are a good place to start.
+Contributions are welcome. [CONTRIBUTING.md](https://github.com/getzoorik/assessment/blob/main/CONTRIBUTING.md) explains how to run the scripts from a clone, how to add a check, a cloud or a region, and how to test a change. Issues labelled [good first issue](https://github.com/getzoorik/assessment/labels/good%20first%20issue) are a good place to start.
 
 This repo is public, so please don't paste a report or your account's names into an issue. To report a security problem, use **Report a vulnerability** on the Security tab, or e-mail founders@zoorik.com.
 
 ## License
 
-Apache-2.0, see [LICENSE](LICENSE). Copyright 2026 Zoorik Private Limited.
+Apache-2.0, see [LICENSE](https://github.com/getzoorik/assessment/blob/main/LICENSE). Copyright 2026 Zoorik Private Limited.

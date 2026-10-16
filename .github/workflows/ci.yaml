@@ -33,6 +33,14 @@ jobs:
         run: |
           python k8s.py --context no-such-context --no-prices --sample-minutes 0 --out "$RUNNER_TEMP/report/"
           python -c "import glob, zipfile; [f] = glob.glob('$RUNNER_TEMP/report/*.xlsx'); assert zipfile.ZipFile(f).testzip() is None"
+      - name: The zoorik package installs, and zoorik k8s writes the same report
+        run: |
+          python -m pip install .
+          zoorik --version
+          zoorik k8s --version
+          zoorik disks --version
+          zoorik k8s --context no-such-context --no-prices --sample-minutes 0 --out "$RUNNER_TEMP/package-report/"
+          python -c "import glob, zipfile; [f] = glob.glob('$RUNNER_TEMP/package-report/*.xlsx'); assert zipfile.ZipFile(f).testzip() is None"
       - name: disks.py stops with a clear message when az is missing
         run: |
           if PATH="$(dirname "$(command -v python)")" python disks.py < /dev/null > disks.out; then exit 1; fi
