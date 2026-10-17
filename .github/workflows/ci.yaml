@@ -23,6 +23,22 @@ jobs:
     defaults:
       run:
         shell: bash
+    env:
+      # python -c "$PDF_CHECK" FOLDER checks that the one report in $RUNNER_TEMP/FOLDER is a whole PDF: its header, its
+      # end, a cross-reference table in which every object's offset points at that object, and page contents whose
+      # length is right and which decompress.
+      PDF_CHECK: >-
+        import glob, os, re, sys, zlib;
+        [f] = glob.glob(os.path.join(os.environ['RUNNER_TEMP'], sys.argv[1], '*.pdf'));
+        d = open(f, 'rb').read();
+        assert d.startswith(b'%PDF-') and d.rstrip().endswith(b'%%EOF'), f;
+        x = int(re.findall(rb'startxref\s+(\d+)', d)[-1]);
+        t = re.match(rb'xref\s+0 (\d+)\s+', d[x:]);
+        e = re.findall(rb'(\d{10}) \d{5} ([fn])', d[x + t.end():])[:int(t.group(1))];
+        assert len(e) == int(t.group(1)) and all(d.startswith(b'%d 0 obj' % i, int(o)) for i, (o, k) in enumerate(e) if k == b'n'), f;
+        s = [(m.end(), int(m.group(1))) for m in re.finditer(rb'/Length (\d+) /Filter /FlateDecode >>\nstream\n', d)];
+        assert s and all(d.startswith(b'\nendstream', i + n) and zlib.decompress(d[i:i + n]) for i, n in s), f;
+        print(f, len(d), 'bytes,', len(e) - 1, 'objects,', len(s), 'pages')
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -41,7 +57,7 @@ jobs:
       - name: k8s.py writes a report when it can't reach a cluster
         run: |
           python k8s.py --context no-such-context --no-prices --sample-minutes 0 --out "$RUNNER_TEMP/report/"
-          python -c "import glob, os, zipfile; [f] = glob.glob(os.path.join(os.environ['RUNNER_TEMP'], 'report', '*.xlsx')); assert zipfile.ZipFile(f).testzip() is None"
+          python -c "$PDF_CHECK" report
       - name: The zoorik package installs, and zoorik assess coral writes the same report
         run: |
           python -m pip install .
@@ -50,7 +66,7 @@ jobs:
           zoorik assess amoeba --version
           zoorik k8s --version
           zoorik assess coral --context no-such-context --no-prices --sample-minutes 0 --out "$RUNNER_TEMP/package-report/"
-          python -c "import glob, os, zipfile; [f] = glob.glob(os.path.join(os.environ['RUNNER_TEMP'], 'package-report', '*.xlsx')); assert zipfile.ZipFile(f).testzip() is None"
+          python -c "$PDF_CHECK" package-report
       - name: disks.py stops with a clear message when neither az nor aws is installed
         run: |
           if PATH="$(dirname "$(command -v python)")" python disks.py < /dev/null > disks.out; then exit 1; fi

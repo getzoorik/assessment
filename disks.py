@@ -3,7 +3,7 @@
 
 Reads the VMs and disks you can see in Azure and AWS, estimates what Zoorik
 Amoeba (Zoorik block storage) could save by rightsizing the data disks of
-your Linux VMs, and writes one Excel file for you to e-mail to Zoorik.
+your Linux VMs, and writes one PDF report for you to e-mail to Zoorik.
 
 Run it in Azure Cloud Shell or AWS CloudShell, or in any other terminal on
 Linux, macOS or Windows where az or aws is signed in. It assesses each cloud
@@ -23,14 +23,15 @@ answer y, it only reads, and it sends nothing anywhere.
   - Azure Resource Graph: your VMs, managed disks and resource groups.
   - Azure Compute: each VM size's data-disk slots and disk limits, and where
     Premium SSD v2 is offered.
-  - Azure Monitor: 14 days of IOPS and throughput for each data disk of a
-    Linux VM.
+  - Azure Monitor: 14 days of IOPS and throughput for the data disks the pool
+    would replace, on each VM whose disk usage was read.
   - prices.azure.com: the public list prices of managed disks.
   AWS, in every enabled region of the account you are signed in to:
-  - EC2: your instances, EBS volumes, and each instance type's EBS limits.
+  - EC2: your instances, EBS volumes, and the EBS limits of each instance
+    type with data volumes.
   - Systems Manager: which instances its agent manages.
-  - CloudWatch: 14 days of IOPS and throughput for each data volume of a
-    Linux instance.
+  - CloudWatch: 14 days of IOPS and throughput for the data volumes the pool
+    would replace, on each instance whose disk usage was read.
   - the AWS Price List API: EBS list prices.
   Only if you answer y to its question: one command that only reads, inside
   each running Linux VM with data disks, through Azure Run Command or AWS
@@ -41,7 +42,7 @@ answer y, it only reads, and it sends nothing anywhere.
   the VM, and records each run in the activity log. Systems Manager keeps the
   command and its output in its Run Command history, its agent keeps a copy
   under /var/lib/amazon/ssm on the instance, and CloudTrail records each call.
-It writes one file: the Excel report, in the current directory. On Windows,
+It writes one file: the PDF report, in the current directory. On Windows,
 an az argument that cmd.exe would change goes through a temporary file that
 az reads and the script deletes at once.
 """
@@ -54,6 +55,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import unicodedata
+import zlib
 
 if sys.version_info < (3, 8):
     print("This needs Python 3.8 or later. Open Azure Cloud Shell or AWS CloudShell and run it there.")
@@ -64,16 +67,14 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-import zipfile
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, List, Optional, Tuple
-from xml.sax.saxutils import escape
 
 # ---------------------------------------------------------------- config
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 ONE_LINER = "curl -fsSL https://zoorik.com/assess/disks | python3 -"
 SEND_TO = "founders@zoorik.com"
 
@@ -92,7 +93,7 @@ METRICS = ("Composite Disk Read Operations/sec", "Composite Disk Write Operation
            "Composite Disk Read Bytes/sec", "Composite Disk Write Bytes/sec")
 
 CLOUD_NAMES = {"azure": "Azure", "aws": "AWS"}
-# MB/s in the report: 10^6 bytes per second on Azure; on AWS MiB/s, the unit gp3 throughput is set in.
+# MB/s: 10^6 bytes per second on Azure; on AWS MiB/s, the unit gp3 throughput is set in.
 MB = {"azure": 1e6, "aws": float(2 ** 20)}
 AWS_ENV = dict(os.environ, AWS_PAGER="")
 PRICE_LIST_REGION = "us-east-1"
@@ -134,6 +135,7 @@ MIN_VM_SLOTS = 8
 RESERVED_SLOTS = 1
 DEMAND_FACTOR = 1.3
 KERNEL_FLOOR = (5, 14)
+NO_PRICE = "no list price"
 
 # Premium SSD v2 limits, from Azure's documentation.
 V2_MIN_IOPS = 3000
@@ -144,8 +146,7 @@ V2_MAX_MBPS = 2000
 
 # How Zoorik Amoeba lays out a new pool on AWS, from its current planner: the hold size, then equal gp3 volumes.
 GP3 = "gp3"
-# The band every VM starts with: Amoeba keeps its pool 80-90% full.
-BAND_LOW = 0.80
+# Amoeba holds a pool at most 90% full, the high edge of the band every VM starts with.
 BAND_HIGH = 0.90
 URGENT_USED = 0.95
 FREE_FLOOR_GIB = 10
@@ -164,8 +165,6 @@ EBS_DEVICE_NAMES = 21
 NITRO_SHARED_LIMIT = 28
 
 # The pool goes on Premium SSD v2 wherever the VM's region and zone offer it, otherwise on Premium SSD.
-POOL_V2 = "Premium SSD v2"
-POOL_V1 = "Premium SSD"
 # Regions where Azure takes Premium SSD v2 on a VM without an availability zone (nonzonal disks), from
 # Microsoft Learn, "Deploy a Premium SSD v2 managed disk", Regional availability (updated 10 Sept 2026).
 # Azure Compute lists only the zones that offer Premium SSD v2, not this, so a region missing here gets Premium SSD.
@@ -192,13 +191,6 @@ DISK_TYPES = {
     "standard_lrs": ("S", "LRS", "Standard HDD"),
     "premiumv2_lrs": ("V2", "LRS", "Premium SSD v2"),
     "ultrassd_lrs": ("ULTRA", "LRS", "Ultra Disk"),
-    "gp3": ("EBS", "", "gp3"),
-    "gp2": ("EBS", "", "gp2"),
-    "io1": ("EBS", "", "io1"),
-    "io2": ("EBS", "", "io2"),
-    "st1": ("EBS", "", "st1"),
-    "sc1": ("EBS", "", "sc1"),
-    "standard": ("EBS", "", "magnetic (standard)"),
 }
 TIER_PRODUCTS = ("Premium SSD Managed Disks", "Standard SSD Managed Disks", "Standard HDD Managed Disks")
 PROVISIONED_PRODUCTS = {"Azure Premium SSD v2": "Premium LRS ", "Ultra Disks": "Ultra LRS "}
@@ -207,20 +199,16 @@ PROVISIONED_METERS = {"Provisioned Capacity": "capacity", "Provisioned IOPS": "i
 RHEL_FAMILY = ("rhel", "centos", "rocky", "almalinux", "ol")
 # A distribution whose ID_LIKE names one of these is RHEL-family too, as Amoeba's agent reads it: Amazon Linux is.
 RHEL_LIKE = ("rhel", "centos", "fedora")
-OS_NAMES = {"ubuntu": "Ubuntu", "debian": "Debian", "rhel": "RHEL", "centos": "CentOS", "rocky": "Rocky Linux",
-            "almalinux": "AlmaLinux", "ol": "Oracle Linux", "sles": "SLES", "sles_sap": "SLES for SAP",
-            "opensuse-leap": "openSUSE Leap", "azurelinux": "Azure Linux", "mariner": "CBL-Mariner",
-            "fedora": "Fedora", "flatcar": "Flatcar", "amzn": "Amazon Linux"}
 
 # The one command that runs inside a VM, and only after a yes. It only reads. The two clouds differ only in how a
 # data disk shows in the VM: by LUN on Azure, by volume id (an NVMe serial) on AWS.
 _GUEST_HEAD = r"""echo S
 echo "K $(uname -r)"
-grep -E '^(ID|ID_LIKE|VERSION_ID)=' /etc/os-release
+grep -E '^(ID|ID_LIKE)=' /etc/os-release
 if grep -qw btrfs /proc/filesystems; then echo "B loaded"; elif modinfo -n btrfs >/dev/null 2>&1; then echo "B module"; else echo "B absent"; fi
 """
 _GUEST_TAIL = r"""
-timeout 30 df -P -B1 -T -l | awk '$1 ~ /^\/dev\// && $1 !~ /^\/dev\/loop/ {m=$7; for (i=8; i<=NF; i++) m=m" "$i; print "D", $2, $3, $4, m}'
+timeout 30 df -P -B1 -l | awk '$1 ~ /^\/dev\// && $1 !~ /^\/dev\/loop/ {m=$6; for (i=7; i<=NF; i++) m=m" "$i; print "D", $3, m}'
 echo E"""
 _AZURE_DISKS = r"""for l in /dev/disk/azure/scsi1/lun*; do n=${l##*/lun}; case $n in ''|*[!0-9]*) continue;; esac; echo "L $n $(lsblk -nro MOUNTPOINT "$l" | tr '\n' ' ')"; done"""
 _AWS_DISKS = r"""for l in /dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_vol*; do case $l in *-part*) continue;; esac; [ -e "$l" ] || continue; v=${l##*_vol}; echo "V vol-${v%%[-_]*} $(lsblk -nro MOUNTPOINT "$l" | tr '\n' ' ')"; done"""
@@ -474,41 +462,24 @@ Hourly = Dict[str, Tuple[float, float, float, float]]
 @dataclass
 class Disk:
     id: str
-    name: str
-    subscription: str
-    resource_group: str
     region: str
     sku: str
     size_gb: int
     tier: str
-    state: str
     iops: Optional[int]
     mbps: Optional[int]
     ade: bool
-    created: str
-    detached: str
     max_shares: int = 1
     multi_attach: bool = False
     cloud: str = "azure"
     price: Optional[float] = None
-    price_tier: str = ""
     price_note: str = ""
     hourly: Optional[Hourly] = None
     metric_note: str = ""
 
     @property
-    def kind(self) -> str:
-        return DISK_TYPES.get(self.sku.lower(), ("", "", self.sku or "Unknown"))[2]
-
-    @property
     def shared(self) -> bool:
         return self.max_shares > 1 or self.multi_attach
-
-    def peak(self) -> Tuple[Optional[float], Optional[float]]:
-        """Peak IOPS and MB/s over the metric window."""
-        if not self.hourly:
-            return None, None
-        return max(v[0] for v in self.hourly.values()), max(v[1] for v in self.hourly.values()) / MB[self.cloud]
 
 
 @dataclass
@@ -525,10 +496,9 @@ class Guest:
     kernel: str = ""
     os_id: str = ""
     os_like: str = ""
-    os_version: str = ""
     btrfs: str = ""
     luns: Dict[int, List[str]] = field(default_factory=dict)
-    mounts: Dict[str, Tuple[str, int]] = field(default_factory=dict)
+    mounts: Dict[str, int] = field(default_factory=dict)
     volumes: Dict[str, List[str]] = field(default_factory=dict)
 
 
@@ -544,7 +514,6 @@ class Vm:
     os_type: str
     power: str
     os_name: str
-    os_version: str
     data: List[DataDisk]
     cloud: str = "azure"
     slots: Optional[int] = None
@@ -558,15 +527,15 @@ class Vm:
     channel: str = ""
     guest: Optional[Guest] = None
     guest_note: str = ""
-    lane: str = ""
     reasons: List[str] = field(default_factory=list)
     used_gb: Optional[float] = None
-    util: Optional[float] = None
     current: Optional[float] = None
+    price_note: str = ""
+    pooled: List[DataDisk] = field(default_factory=list)
+    today: Optional[float] = None
     pool_gb: Optional[int] = None
     pool_cost: Optional[float] = None
     saving: Optional[float] = None
-    no_saving: bool = False
 
     @property
     def linux(self) -> bool:
@@ -609,7 +578,6 @@ class Scan:
     label: str
     scopes: List[Subscription]
     skipped: List[Subscription] = field(default_factory=list)
-    guest_answer: str = "no running Linux VM with data disks to read"
 
 
 def r2(value: float) -> float:
@@ -618,13 +586,6 @@ def r2(value: float) -> float:
 
 def iso(moment: datetime) -> str:
     return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def parse_time(text: str) -> Optional[datetime]:
-    match = re.match(r"(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})", text or "")
-    if not match:
-        return None
-    return datetime.strptime(match.group(1) + "T" + match.group(2), "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
 
 
 # ---------------------------------------------------------------- inventory
@@ -637,18 +598,14 @@ VM_QUERY = """resources
     osType = tostring(properties.storageProfile.osDisk.osType),
     power = tostring(properties.extended.instanceView.powerState.code),
     osName = tostring(properties.extended.instanceView.osName),
-    osVersion = tostring(properties.extended.instanceView.osVersion),
     dataDisks = properties.storageProfile.dataDisks
 | order by id asc"""
 DISK_QUERY = """resources
 | where type =~ 'microsoft.compute/disks'
-| project id, name, resourceGroup, subscriptionId, location,
-    sku = tostring(sku.name), tier = tostring(properties.tier),
-    sizeGb = toint(properties.diskSizeGB), state = tostring(properties.diskState),
+| project id, subscriptionId, location, sku = tostring(sku.name), tier = tostring(properties.tier),
+    sizeGb = toint(properties.diskSizeGB),
     iops = tolong(properties.diskIOPSReadWrite), mbps = tolong(properties.diskMBpsReadWrite),
-    ade = tobool(properties.encryptionSettingsCollection.enabled), maxShares = toint(properties.maxShares),
-    created = tostring(properties.timeCreated),
-    detached = coalesce(tostring(properties.LastOwnershipUpdateTime), tostring(properties.lastOwnershipUpdateTime))
+    ade = tobool(properties.encryptionSettingsCollection.enabled), maxShares = toint(properties.maxShares)
 | order by id asc"""
 MANAGED_GROUPS_QUERY = """resourcecontainers
 | where type =~ 'microsoft.resources/subscriptions/resourcegroups' and isnotempty(managedBy)
@@ -694,12 +651,9 @@ def graph(query: str, subscriptions: List[str]) -> list:
 
 
 def make_disk(r: dict) -> Disk:
-    return Disk(id=r.get("id") or "", name=r.get("name") or "", subscription=r.get("subscriptionId") or "",
-                resource_group=r.get("resourceGroup") or "", region=(r.get("location") or "").lower(),
-                sku=r.get("sku") or "", size_gb=int(r.get("sizeGb") or 0), tier=r.get("tier") or "",
-                state=r.get("state") or "", iops=r.get("iops"), mbps=r.get("mbps"), ade=r.get("ade") is True,
-                created=r.get("created") or "", detached=r.get("detached") or "",
-                max_shares=r.get("maxShares") if isinstance(r.get("maxShares"), int) else 1)
+    return Disk(id=r.get("id") or "", region=(r.get("location") or "").lower(), sku=r.get("sku") or "",
+                size_gb=int(r.get("sizeGb") or 0), tier=r.get("tier") or "", iops=r.get("iops"), mbps=r.get("mbps"),
+                ade=r.get("ade") is True, max_shares=r.get("maxShares") if isinstance(r.get("maxShares"), int) else 1)
 
 
 def make_vm(r: dict, disks: Dict[str, Disk]) -> Vm:
@@ -716,8 +670,7 @@ def make_vm(r: dict, disks: Dict[str, Disk]) -> Vm:
     return Vm(id=r.get("id") or "", name=r.get("name") or "", subscription=r.get("subscriptionId") or "",
               resource_group=r.get("resourceGroup") or "", region=(r.get("location") or "").lower(),
               zone=",".join(r.get("zones") or []), size=r.get("size") or "", os_type=r.get("osType") or "",
-              power=power.capitalize(), os_name=r.get("osName") or "", os_version=r.get("osVersion") or "",
-              data=sorted(data, key=lambda x: x.lun))
+              power=power.capitalize(), os_name=r.get("osName") or "", data=sorted(data, key=lambda x: x.lun))
 
 
 def managing_service(managed_by: str) -> str:
@@ -726,24 +679,24 @@ def managing_service(managed_by: str) -> str:
     return match.group(1) if match else "another Azure service"
 
 
-def inventory(subs: List[Subscription]) -> Tuple[List[Vm], List[Disk]]:
-    """Every VM and managed disk in the subscriptions, through Azure Resource Graph."""
+def inventory(subs: List[Subscription]) -> List[Vm]:
+    """Every VM in the subscriptions with its managed disks, through Azure Resource Graph."""
     if not subs:
-        return [], []
+        return []
     try:
         seen = {r.get("subscriptionId") for r in graph(SUBSCRIPTIONS_QUERY, [s.id for s in subs])}
     except Failed as e:
         for s in subs:
             s.note = f"Resource Graph: {e}"
-        return [], []
+        return []
     for s in subs:
         if s.id not in seen:
             s.note = "Resource Graph cannot read it (no Reader access?)"
     readable = [s.id for s in subs if not s.note]
     if not readable:
-        return [], []
-    disk_list = [make_disk(r) for r in graph(DISK_QUERY, readable)]
-    disks = {d.id.lower(): d for d in disk_list}
+        return []
+    disk_rows = graph(DISK_QUERY, readable)
+    disks = {(r.get("id") or "").lower(): make_disk(r) for r in disk_rows}
     vms = [make_vm(r, disks) for r in graph(VM_QUERY, readable)]
     try:
         managed = {(r.get("subscriptionId"), (r.get("name") or "").lower()): managing_service(r.get("managedBy"))
@@ -754,8 +707,8 @@ def inventory(subs: List[Subscription]) -> Tuple[List[Vm], List[Disk]]:
         v.managed_by = managed.get((v.subscription, v.resource_group.lower()), "")
     for s in subs:
         s.vms = sum(1 for v in vms if v.subscription == s.id)
-        s.disks = sum(1 for d in disk_list if d.subscription == s.id)
-    return vms, disk_list
+        s.disks = sum(1 for r in disk_rows if r.get("subscriptionId") == s.id)
+    return vms
 
 
 # ---------------------------------------------------------------- AWS inventory
@@ -783,14 +736,11 @@ def tags(item: dict) -> Dict[str, str]:
     return {t.get("Key"): t.get("Value") for t in item.get("Tags") or []}
 
 
-def make_volume(v: dict, account: str, region: str) -> Disk:
+def make_volume(v: dict, region: str) -> Disk:
     kind = v.get("VolumeType") or ""
-    return Disk(id=v.get("VolumeId") or "", name=tags(v).get("Name") or v.get("VolumeId") or "", subscription=account,
-                resource_group="", region=region, sku=kind, size_gb=int(v.get("Size") or 0), tier="",
-                state="Unattached" if v.get("State") == "available" else (v.get("State") or "").capitalize(),
+    return Disk(id=v.get("VolumeId") or "", region=region, sku=kind, size_gb=int(v.get("Size") or 0), tier="",
                 iops=v.get("Iops"), mbps=v.get("Throughput") if kind == GP3 else None, ade=False,
-                created=v.get("CreateTime") or "", detached="", multi_attach=v.get("MultiAttachEnabled") is True,
-                cloud="aws")
+                multi_attach=v.get("MultiAttachEnabled") is True, cloud="aws")
 
 
 def make_instance(i: dict, account: str, region: str, volumes: Dict[str, Disk]) -> Vm:
@@ -804,11 +754,10 @@ def make_instance(i: dict, account: str, region: str, volumes: Dict[str, Disk]) 
         data.append(DataDisk(lun=len(data), size_gb=disk.size_gb if disk else 0, disk=disk,
                              note="" if disk else "volume details not readable", device=m.get("DeviceName") or ""))
     return Vm(id=i.get("InstanceId") or "", name=tags(i).get("Name") or i.get("InstanceId") or "",
-              subscription=account, resource_group="", region=region,
-              zone=(i.get("Placement") or {}).get("AvailabilityZone") or "", size=i.get("InstanceType") or "",
+              subscription=account, resource_group="", region=region, zone="", size=i.get("InstanceType") or "",
               os_type="Windows" if (i.get("Platform") or "").lower() == "windows" else "Linux",
               power=((i.get("State") or {}).get("Name") or "").capitalize(), os_name=i.get("PlatformDetails") or "",
-              os_version="", data=data, cloud="aws")
+              data=data, cloud="aws")
 
 
 def ebs_limits(vm: Vm, instance: dict, itype: dict) -> None:
@@ -841,23 +790,23 @@ def instance_types(names: List[str], region: str) -> Dict[str, dict]:
     return types
 
 
-def aws_region(scope: Subscription) -> Tuple[List[Vm], List[Disk]]:
-    """One region's instances and EBS volumes, each instance type's EBS limits, and which instances Systems Manager
-    manages."""
+def aws_region(scope: Subscription) -> Tuple[List[Vm], int]:
+    """One region's instances with their EBS volumes, each instance type's EBS limits, and which instances Systems
+    Manager manages; and how many volumes the region holds."""
     region, account = scope.id, scope.tenant
     reservations = (aws(["ec2", "describe-instances", "--filters", LIVE_STATES], region) or {}).get("Reservations")
     instances = [i for r in reservations or [] for i in r.get("Instances") or []]
-    volumes = {v.get("VolumeId"): make_volume(v, account, region)
+    volumes = {v.get("VolumeId"): make_volume(v, region)
                for v in (aws(["ec2", "describe-volumes"], region) or {}).get("Volumes") or []}
     vms = [make_instance(i, account, region, volumes) for i in instances]
     try:
-        types, missing = instance_types(sorted({v.size for v in vms if v.size}), region), ""
+        types, missing = instance_types(sorted({v.size for v in vms if v.size and v.data}), region), ""
     except Failed as e:
         types, missing = {}, f"instance type limits not readable: {e}"
     for v, i in zip(vms, instances):
         if v.size in types:
             ebs_limits(v, i, types[v.size])
-        else:
+        elif v.data:
             v.facts_note = missing or f"{v.size or 'instance type'} not listed in {region}"
     if any(v.linux and v.data for v in vms):
         try:
@@ -869,24 +818,23 @@ def aws_region(scope: Subscription) -> Tuple[List[Vm], List[Disk]]:
         for v in vms:
             info = managed.get(v.id)
             if info:
-                v.os_name, v.os_version = info.get("PlatformName") or v.os_name, info.get("PlatformVersion") or ""
+                v.os_name = info.get("PlatformName") or v.os_name
             else:
                 v.channel = unmanaged or "Systems Manager does not manage it (no SSM agent reporting)"
-    return vms, list(volumes.values())
+    return vms, len(volumes)
 
 
-def aws_inventory(regions: List[Subscription]) -> Tuple[List[Vm], List[Disk]]:
-    """Every EC2 instance and EBS volume in the regions, a few regions at a time; a region that fails has its note."""
+def aws_inventory(regions: List[Subscription]) -> List[Vm]:
+    """Every EC2 instance in the regions with its EBS volumes, a few regions at a time; a region that fails has its
+    note."""
     vms: List[Vm] = []
-    disks: List[Disk] = []
     for s, result in zip(regions, parallel(aws_region, regions, "Reading AWS regions")):
         if isinstance(result, Failed):
             s.note = str(result)
             continue
-        s.vms, s.disks = len(result[0]), len(result[1])
+        s.vms, s.disks = len(result[0]), result[1]
         vms += result[0]
-        disks += result[1]
-    return vms, disks
+    return vms
 
 
 # ---------------------------------------------------------------- VM sizes and prices
@@ -990,10 +938,10 @@ def billed_tier(letter: str, size_gb: int) -> Optional[str]:
 
 def price_disk(d: Disk, prices: Dict[str, Optional[Prices]]) -> None:
     """Set the disk's list price per month, or the reason it has none."""
-    family, redundancy, label = DISK_TYPES.get(d.sku.lower(), ("", "", d.sku))
     region_price = prices.get(d.region)
     if d.cloud == "aws":
         return price_volume(d, region_price)
+    family, redundancy, label = DISK_TYPES.get(d.sku.lower(), ("", "", d.sku))
     if not family:
         d.price_note = f"{d.sku or 'unknown'} disks are not priced"
         return
@@ -1016,7 +964,6 @@ def price_disk(d: Disk, prices: Dict[str, Optional[Prices]]) -> None:
     if not tier:
         d.price_note = f"{d.size_gb:,} GB is above the largest {label} tier"
         return
-    d.price_tier = tier
     monthly = region_price.tiers.get(f"{tier} {redundancy}")
     d.price = None if monthly is None else r2(monthly)
     if d.price is None:
@@ -1185,8 +1132,6 @@ def volume_metrics(disk: Disk) -> Hourly:
 # ---------------------------------------------------------------- inside the VM
 
 RUN_COMMAND_STARTED: Dict[str, List[str]] = {"azure": [], "aws": []}
-# The instances where Systems Manager took the command and gave back its id; a refused send-command ran nothing.
-RUN_COMMAND_SENT: List[str] = []
 
 
 def read_guest(vm: Vm) -> Guest:
@@ -1211,7 +1156,6 @@ def read_instance(vm: Vm) -> Guest:
     command = (sent.get("Command") or {}).get("CommandId")
     if not command:
         raise Failed("Systems Manager did not start the command")
-    RUN_COMMAND_SENT.append(vm.id)
     deadline = time.monotonic() + RUN_COMMAND_TIMEOUT
     while time.monotonic() < deadline:
         time.sleep(SSM_POLL_SECONDS)
@@ -1243,14 +1187,12 @@ def parse_guest(text: str) -> Guest:
     g = Guest()
     for line in lines:
         key, _, value = line.partition("=")
-        if key in ("ID", "ID_LIKE", "VERSION_ID") and value:
-            value = value.strip().strip("\"'")
+        if key in ("ID", "ID_LIKE") and value:
+            value = value.strip().strip("\"'").lower()
             if key == "ID":
-                g.os_id = value.lower()
-            elif key == "ID_LIKE":
-                g.os_like = value.lower()
+                g.os_id = value
             else:
-                g.os_version = value
+                g.os_like = value
             continue
         tag, _, rest_of_line = line.partition(" ")
         if tag == "K":
@@ -1265,9 +1207,9 @@ def parse_guest(text: str) -> Guest:
             volume, _, mounts = rest_of_line.partition(" ")
             g.volumes[volume] = [unescape_lsblk(m) for m in mounts.split() if m.startswith("/")]
         elif tag == "D":
-            parts = rest_of_line.split(" ", 3)
-            if len(parts) == 4 and parts[1].isdigit() and parts[2].isdigit():
-                g.mounts[parts[3]] = (parts[0], int(parts[2]))
+            used, _, mount = rest_of_line.partition(" ")
+            if used.isdigit() and mount:
+                g.mounts[mount] = int(used)
     if not g.kernel or g.btrfs not in ("loaded", "module", "absent"):
         raise Failed("the command's output was not readable")
     return g
@@ -1285,15 +1227,6 @@ def rhel_family(vm: Vm) -> bool:
     name = vm.os_name.lower()
     return any(word in name for word in ("rhel", "red hat", "redhat", "centos", "rocky", "alma", "oracle",
                                          "amazon linux"))
-
-
-def os_label(vm: Vm) -> str:
-    g = vm.guest
-    if g and g.os_id:
-        return f"{OS_NAMES.get(g.os_id, g.os_id.capitalize())} {g.os_version}".strip()
-    if vm.os_name:
-        return f"{OS_NAMES.get(vm.os_name.lower(), vm.os_name)} {vm.os_version}".strip()
-    return vm.os_type.capitalize()
 
 
 # ---------------------------------------------------------------- pool sizing (as Zoorik Amoeba plans it)
@@ -1451,9 +1384,9 @@ def gp3_pool(vm: Vm, used_bytes: int, peak: Tuple[float, float, float, float]) -
     top_iops = max(GP3_BASE_IOPS, min(GP3_MAX_IOPS, size * GP3_IOPS_PER_GIB))
     top_mbps = max(GP3_BASE_MBPS, min(GP3_MAX_MBPS, math.floor(top_iops * GP3_MBPS_PER_IOPS)))
     if size > GP3_MAX_GIB:
-        raise Failed(f"not estimated: {count} gp3 volumes of {size:,} GB, larger than gp3's {GP3_MAX_GIB:,} GB")
+        raise Failed("too much data for one pool: not estimated")
     if need_iops > top_iops or need_mbps > top_mbps:
-        raise Overloaded(f"not estimated: {count} gp3 volumes of {size:,} GB cannot carry the measured peak x 1.3")
+        raise Overloaded("too busy for a pool of this size: not estimated")
     iops = min(need_iops, top_iops)
     if vm.uncached_iops > 0:
         iops = min(iops, max(GP3_BASE_IOPS, vm.uncached_iops // count))
@@ -1469,17 +1402,16 @@ def screen(vm: Vm) -> List[str]:
     """Reasons Amoeba cannot take the VM, from what the cloud reports (before looking inside it)."""
     red = []
     if not vm.linux:
-        red.append(f"{vm.os_type or 'Non-Linux'} VM; Amoeba supports Linux")
+        red.append(f"{vm.os_type or 'Non-Linux'} VM: not estimated by this assessment yet")
     if vm.managed_by:
-        red.append(f"in a resource group managed by {vm.managed_by}; Amoeba does not take VMs another Azure "
-                   "service runs")
+        red.append(f"run by another Azure service ({re.sub(r'^Microsoft[.]', '', vm.managed_by.split('/')[0])}): "
+                   "Amoeba leaves it to that service")
     if vm.cloud == "azure" and vm.slots is not None and vm.slots < MIN_VM_SLOTS:
-        red.append(f"{vm.size} has {vm.slots} data-disk slots; Amoeba needs {MIN_VM_SLOTS} or more")
+        red.append(f"too few data-disk slots ({vm.slots}): Amoeba needs {MIN_VM_SLOTS} or more")
     if vm.nvme is False:
-        red.append(f"{vm.size} is a Xen instance type, whose volumes are not NVMe devices named by volume id; "
-                   "Amoeba needs a Nitro type")
+        red.append(f"{vm.size} is an older instance type: Amoeba needs a Nitro instance type")
     if vm.linux and rhel_family(vm):
-        red.append("RHEL-family Linux; its stock kernel has no btrfs")
+        red.append("Red Hat family Linux: not supported yet")
     return red
 
 
@@ -1492,6 +1424,12 @@ def data_mounts(vm: Vm) -> Dict[str, List[int]]:
             for point in points:
                 mounts.setdefault(point, []).append(lun)
     return mounts
+
+
+def poolable(vm: Vm) -> Dict[str, List[int]]:
+    """The data mounts a pool can take: those on no shared disk."""
+    shared = {dd.lun for dd in vm.data if dd.disk and dd.disk.shared}
+    return {m: luns for m, luns in data_mounts(vm).items() if not shared & set(luns)}
 
 
 def pooled_peak(pooled: List[DataDisk]) -> Tuple[float, float, float, float]:
@@ -1545,8 +1483,7 @@ def v1_shortfall(vm: Vm, members: List[int], peak_iops: float, peak_mbps: float)
     has_mbps = sum(V1_TIER_PERFORMANCE[tier_up(size, False)][1] for size in members)
     if need_iops <= has_iops and need_mbps <= has_mbps:
         return ""
-    return (f"not estimated: a Premium SSD pool of this size carries {has_iops:,} IOPS and {has_mbps:,} MB/s, "
-            f"less than the measured peak x 1.3 ({math.ceil(need_iops):,} IOPS, {math.ceil(need_mbps):,} MB/s)")
+    return "too busy for a pool of this size: not estimated"
 
 
 def azure_pool(vm: Vm, g: Guest, mounts: Dict[str, List[int]], peak: Tuple[float, float, float, float],
@@ -1554,14 +1491,14 @@ def azure_pool(vm: Vm, g: Guest, mounts: Dict[str, List[int]], peak: Tuple[float
     """(GB, $/month) of the Premium SSD v2 or Premium SSD pool Amoeba builds on Azure; None when the free slots
     cannot hold it. Raises Failed (Overloaded when it cannot carry the load) with the reason when it is not
     estimated."""
-    used = sum(max(1, math.ceil(g.mounts[m][1] / GIB)) for m in mounts)
+    used = sum(max(1, math.ceil(g.mounts[m] / GIB)) for m in mounts)
     pool = pool_size_gib(used)
     layout = pool_members(pool, used, vm.slots, len(vm.data), vm.uncached_mbps, vm.pool_v2)
     if layout is None:
         return None
     data_members, small = layout
     if sum(data_members) < pool:
-        raise Failed(f"{used:,} GB used is more than one pool holds; not estimated")
+        raise Failed("too much data for one pool: not estimated")
     members = data_members + [SMALL_MEMBER_GIB] * small
     if not vm.pool_v2:
         short = v1_shortfall(vm, members, peak[0], peak[1])
@@ -1576,7 +1513,7 @@ def aws_pool(vm: Vm, g: Guest, mounts: Dict[str, List[int]], peak: Tuple[float, 
              region_price: Prices) -> Optional[Tuple[int, float]]:
     """(GB, $/month) of the gp3 pool Amoeba builds on AWS; None when the free slots cannot hold it. Raises Failed
     (Overloaded when it cannot carry the load) with the reason when it is not estimated."""
-    layout = gp3_pool(vm, sum(g.mounts[m][1] for m in mounts), peak)
+    layout = gp3_pool(vm, sum(g.mounts[m] for m in mounts), peak)
     if layout is None:
         return None
     rate = region_price.ebs.get(GP3)
@@ -1593,10 +1530,8 @@ def under(vm: Vm, mounts: Dict[str, List[int]]) -> List[DataDisk]:
 
 
 def measure(vm: Vm, g: Guest, mounts: Dict[str, List[int]]) -> None:
-    """Used GB on the mounts the pool takes, and how full it makes the disks under them."""
-    vm.used_gb = sum(g.mounts[m][1] for m in mounts) / GIB
-    provisioned = sum(dd.size_gb for dd in under(vm, mounts))
-    vm.util = vm.used_gb / provisioned if provisioned else None
+    """Used GB on the mounts the pool takes."""
+    vm.used_gb = sum(g.mounts[m] for m in mounts) / GIB
 
 
 def plan_pool(vm: Vm, g: Guest, mounts: Dict[str, List[int]],
@@ -1617,35 +1552,31 @@ def plan_pool(vm: Vm, g: Guest, mounts: Dict[str, List[int]],
 
 
 def assess(vm: Vm, prices: Dict[str, Optional[Prices]]) -> None:
-    """Lane, used space and the saving for one VM; every blank figure gets its reason."""
+    """Used space and the saving for one VM, or the reasons it has none."""
     red, amber, notes = screen(vm), [], []
     g, unread = vm.guest, vm.guest_note
     aws_vm = vm.cloud == "aws"
     if g and not g.luns:
         g = None
-        unread = vm.guest_note = ("the instance shows no EBS NVMe links (/dev/disk/by-id) to match its volumes"
-                                  if aws_vm else "the VM shows no /dev/disk/azure/scsi1 links to match its data disks")
-    shared_kind = "Multi-Attach volume" if aws_vm else "shared disk"
-    shared = {dd.lun for dd in vm.data if dd.disk and dd.disk.shared}
-    on_data = data_mounts(vm) if g else {}
-    mounts = {m: luns for m, luns in on_data.items() if not shared & set(luns)}
+        unread = vm.guest_note = ("its volumes could not be matched inside the instance" if aws_vm
+                                  else "its data disks could not be matched inside the VM")
+    on_data, mounts = (data_mounts(vm), poolable(vm)) if g else ({}, {})
     if g:
         version = kernel_version(g.kernel)
         if not rhel_family(vm) and g.btrfs not in ("loaded", "module"):
-            red.append("btrfs is not available in this kernel")
+            red.append("this Linux kernel is not supported yet")
         if version and version < KERNEL_FLOOR:
-            amber.append(f"kernel {g.kernel} is below 5.14; upgrade the kernel first (Ubuntu 20.04: the HWE kernel)")
+            amber.append(f"needs work first: upgrade its Linux kernel ({g.kernel}) to 5.14 or later")
         if not mounts:
-            red.append(f"its mounted data disks are {shared_kind}s, which Amoeba does not pool" if on_data
-                       else "no mounted data disk found inside the VM")
+            red.append("its data disks are shared with other VMs: Amoeba leaves them as they are" if on_data
+                       else "no data disk is mounted inside the VM")
     if any(dd.disk and dd.disk.ade for dd in vm.data):
-        amber.append("Azure Disk Encryption is on; move to server-side encryption first")
+        amber.append("needs work first: move from Azure Disk Encryption to server-side encryption")
 
     unpriced = [dd for dd in vm.data if not dd.disk or dd.disk.price is None]
     vm.current = None if unpriced else r2(sum(dd.disk.price for dd in vm.data))
     if unpriced:
-        first = unpriced[0]
-        notes.append(f"today's cost unknown: {first.note or first.disk.price_note}")
+        vm.price_note = unpriced[0].note or unpriced[0].disk.price_note
 
     pooled = sorted({lun for luns in mounts.values() for lun in luns})
     pooled_disks = [dd for dd in vm.data if dd.lun in pooled]
@@ -1653,621 +1584,821 @@ def assess(vm: Vm, prices: Dict[str, Optional[Prices]]) -> None:
     if g and mounts and not missing:
         measure(vm, g, mounts)
     elif missing:
-        notes.append(f"df did not report {missing[0]}")
-    if g and mounts:
-        if shared:
-            notes.append(f"{len(shared)} {shared_kind}(s) stay as they are; Amoeba does not pool a {shared_kind}")
-        left = len([dd for dd in vm.data if dd.lun not in pooled and dd.lun not in shared])
-        if left:
-            notes.append(f"{left} data disk(s) without a mounted file system stay as they are")
+        notes.append(f"used space on {missing[0]} not reported")
 
-    def finish(lane: str, why: str = "") -> None:
-        vm.lane = lane
+    def finish(why: str = "") -> None:
         vm.reasons = red + amber + ([why] if why else []) + notes
 
     if red:
-        return finish("Not supported")
+        return finish()
     if not g:
-        return finish("Not checked", f"disk usage not read: {unread}" if unread else "")
-    lane = "Needs work" if amber else "Ready"
+        return finish(f"disk usage not read: {unread}" if unread else "")
     if missing or vm.used_gb is None:
-        return finish(lane)
+        return finish()
     if vm.slots is None:
-        return finish(lane, f"VM size limits not readable: {vm.facts_note or 'size not listed'}")
+        return finish(f"VM size limits not readable: {vm.facts_note or 'size not listed'}")
     if any(dd.disk is None or dd.disk.price is None for dd in pooled_disks):
-        return finish(lane)
+        return finish(NO_PRICE)
     if any(dd.disk.hourly is None for dd in pooled_disks):
         bad = next(dd.disk for dd in pooled_disks if dd.disk.hourly is None)
-        return finish(lane, f"IOPS not measured: {bad.metric_note or 'no metric data'}")
+        return finish(f"disk activity not read: {bad.metric_note or 'no metric data'}")
 
     try:
         sized, kept = plan_pool(vm, g, mounts, prices.get(vm.region) or Prices())
     except Failed as e:
-        return finish(lane, str(e))
+        return finish(str(e))
     if sized is None:
-        amber.append("not enough free data-disk slots to build the pool beside today's disks")
-        return finish("Needs work")
+        return finish("too few free data-disk slots to add the pool beside today's disks")
     if len(kept) < len(mounts):
         measure(vm, g, kept)
         pooled_disks = under(vm, kept)
-        notes += [f"{m} stays on its {'volumes' if aws_vm else 'disks'}, as Amoeba leaves a mount whose load the "
-                  "pool cannot carry" for m in mounts if m not in kept]
     vm.pool_gb, vm.pool_cost = sized[0], r2(sized[1])
     today = r2(sum(dd.disk.price for dd in pooled_disks))
     if today - vm.pool_cost <= 0:
-        vm.no_saving = True
-        return finish(lane, f"the pool (${vm.pool_cost:,.2f}/mo) would cost no less than these disks "
-                            f"(${today:,.2f}/mo)")
-    vm.saving = r2(today - vm.pool_cost)
-    if any(dd.disk.sku.lower().endswith("_zrs") for dd in pooled_disks):
-        notes.append("today's disks are zone-redundant (ZRS); the pool is locally redundant (LRS), and part of "
-                     "the saving is that difference")
-    finish(lane)
+        return finish(f"no saving: the pool would cost {usd(half_up(vm.pool_cost))} a month, no less than these "
+                      f"disks ({usd(half_up(today))})")
+    vm.pooled, vm.today, vm.saving = pooled_disks, today, r2(today - vm.pool_cost)
+    finish()
 
 
 # ---------------------------------------------------------------- report
 
-def money(v: Optional[float]) -> str:
-    return "not available" if v is None else f"${v:,.2f}"
+def plural(n: int, word: str) -> str:
+    return f"{n:,} {word}" + ("" if n == 1 else "s")
 
 
-def gb(v: Optional[float]) -> Optional[int]:
-    return None if v is None else int(round(v))
+def usd(v: int) -> str:
+    return f"${v:,}"
 
 
-def attached_once(vms: List[Vm]) -> List[DataDisk]:
-    """The VMs' data disks, each once: a shared disk shows on every VM it is attached to but is billed once."""
-    seen, out = set(), []
-    for v in vms:
-        for dd in v.data:
-            key = dd.disk.id.lower() if dd.disk else (v.id, dd.lun)
-            if key not in seen:
-                seen.add(key)
-                out.append(dd)
-    return out
+def less(v: int) -> str:
+    """A saving in whole dollars: minus and the dollars, or $0."""
+    return "\u2212" + usd(v) if v > 0 else "$0"
 
 
-def priced(disks: List[DataDisk]) -> List[float]:
-    return [dd.disk.price for dd in disks if dd.disk and dd.disk.price is not None]
+def percent(part: int, whole: int) -> int:
+    return half_up(100 * part / whole) if whole > 0 else 0
 
 
-def no_saving_text(vms: List[Vm]) -> str:
-    """What the saving figure says when no VM has a saving."""
-    read = [v for v in vms if v.data and v.linux and v.guest and v.guest.luns]
-    estimated = [v for v in vms if v.saving or v.no_saving]
-    if not read:
-        return "not estimated: no VM had its disk usage read"
-    if estimated:
-        return f"none found on the {len(estimated)} VM(s) estimated"
-    return "not estimated on the VMs that were read; see the Reason column on the VMs sheet"
+def space(gib: float) -> str:
+    """Disk space as the report writes it: GB below 1,000, then TB with one decimal."""
+    gib = half_up(gib)
+    return f"{gib / 1000:.1f} TB" if gib >= 1000 else f"{gib} GB"
 
 
-VM_COLS = [("Subscription", "text"), ("Resource group", "text"), ("VM", "text"), ("Region", "text"),
-           ("Zone", "text"), ("Size", "text"), ("OS", "text"), ("Power state", "text"),
-           ("Data-disk slots", "int"), ("Data disks", "int"), ("Provisioned GB", "int"), ("Used GB", "int"),
-           ("Mounted-disk utilization %", "pct"), ("Current $/mo", "usd"), ("Pool disks", "text"),
-           ("Pool GB", "int"), ("Pool $/mo", "usd"), ("Saving $/mo", "usd"), ("Lane", "text"), ("Reason", "text")]
-DISK_COLS = [("VM", "text"), ("Resource group", "text"), ("Disk", "text"), ("LUN", "int"), ("Device", "text"),
-             ("Disk type", "text"), ("Tier", "text"), ("GB", "int"), ("Provisioned IOPS", "int"),
-             ("Provisioned MB/s", "int"), ("Peak IOPS (14 days)", "int"), ("Peak MB/s (14 days)", "int"),
-             ("Mount", "text"), ("Used GB", "int"), ("$/mo", "usd"), ("Note", "text")]
-UNATTACHED_COLS = [("Subscription", "text"), ("Resource group", "text"), ("Disk", "text"), ("Region", "text"),
-                   ("Disk type", "text"), ("Tier", "text"), ("GB", "int"), ("$/mo", "usd"),
-                   ("Days since detached", "int"), ("Note", "text")]
-# Columns only one cloud fills. A run without that cloud leaves them out.
-AZURE_COLS = {"Resource group", "LUN", "Tier", "Days since detached"}
-AWS_COLS = {"Device"}
+def vm_size(vm: Vm) -> str:
+    """The VM size as people say it: Standard_E8s_v5 is E8s v5."""
+    return vm.size if vm.cloud == "aws" else re.sub(r"^Standard_", "", vm.size).replace("_", " ")
 
 
-def fit(columns: list, rows: list, total: Optional[list], clouds: List[str]) -> Tuple[list, list, Optional[list]]:
-    """The columns that apply to the clouds in the run, each row trimmed to them; the scope column named for them."""
-    drop = (set() if "azure" in clouds else AZURE_COLS) | (set() if "aws" in clouds else AWS_COLS)
-    keep = [i for i, (name, _) in enumerate(columns) if name not in drop]
-    scope = {("azure",): "Subscription", ("aws",): "Account"}.get(tuple(clouds), "Subscription or account")
-    cols = [(scope if columns[i][0] == "Subscription" else columns[i][0], columns[i][1]) for i in keep]
-    return cols, [[r[i] for i in keep] for r in rows], [total[i] for i in keep] if total else None
+def disk_sizes(disks: List[DataDisk]) -> str:
+    """The disks by size, largest first: 4 x 1.0 TB, or 2 x 512 GB + 1 x 128 GB."""
+    sizes: Dict[int, int] = {}
+    for dd in disks:
+        sizes[dd.size_gb] = sizes.get(dd.size_gb, 0) + 1
+    return " + ".join(f"{n} \xd7 {space(size)}" for size, n in sorted(sizes.items(), reverse=True))
 
 
-def pool_disks(vm: Vm) -> str:
-    """The disk type the VM's pool would use; blank where Amoeba cannot take the VM or it is not known."""
-    if not vm.linux or vm.lane in ("", "Not supported"):
-        return ""
-    if vm.cloud == "aws":
-        return GP3
-    return "" if vm.pool_v2 is None else POOL_V2 if vm.pool_v2 else POOL_V1
+def space_bar(paid: float, used: float, after: float):
+    """Art: disk space paid for today (grey track), used (blue) and the dashed outline of the size after."""
+    def art(pdf, x, y, w):
+        if pdf:
+            top = max(paid, after)
+            pdf.rect(x, y, w * paid / top, 7.5, RULE, r=3.75)
+            pdf.rect(x, y, w * used / top, 7.5, BLUE, r=3.75)
+            pdf.dashed(x, y - 1.5, w * after / top, 10.5, 4.5)
+        return 7.5
+    return art
 
 
-def vm_rows(vms: List[Vm], names: Dict[str, str]) -> Tuple[list, list]:
-    listed = sorted((v for v in vms if v.data), key=lambda v: (-(v.saving or 0), -(v.current or 0), v.name))
-    rows = []
-    for v in listed:
-        saving = "No saving" if v.no_saving else v.saving
-        rows.append([names.get(v.subscription, v.subscription), v.resource_group, v.name, v.region, v.zone, v.size,
-                     os_label(v), v.power, v.slots, len(v.data), sum(dd.size_gb for dd in v.data), gb(v.used_gb),
-                     v.util, v.current, pool_disks(v), v.pool_gb, v.pool_cost, saving, v.lane, "; ".join(v.reasons)])
-    once = attached_once(listed)
-    spend = priced(once)
-    notes = []
-    if spend and any(v.current is None for v in listed):
-        notes.append("Current $/mo adds every priced disk, also on VMs whose own cell is blank")
-    if len(once) < sum(len(v.data) for v in listed):
-        notes.append("a shared disk counts once")
-    total = ["TOTAL", "", "", "", "", "", "", "", None, len(once), sum(dd.size_gb for dd in once), None, None,
-             r2(sum(spend)) if spend else None, "", None, None,
-             r2(sum(v.saving for v in listed if v.saving)) if any(v.saving for v in listed) else None, "",
-             "; ".join(notes)]
-    return rows, total
-
-
-def disk_rows(vms: List[Vm]) -> list:
-    rows = []
-    for v in sorted(vms, key=lambda v: (v.name, v.resource_group)):
-        mounts = data_mounts(v)
-        for dd in v.data:
-            d = dd.disk
-            if d is None:
-                continue
-            on_disk = sorted(m for m, luns in mounts.items() if dd.lun in luns)
-            used, notes = None, [d.price_note] if d.price_note else []
-            if d.shared:
-                notes.append(("Multi-Attach volume" if d.cloud == "aws" else "shared disk") + "; not pooled")
-            if on_disk and v.guest and all(m in v.guest.mounts for m in on_disk):
-                if all(len(mounts[m]) == 1 for m in on_disk):
-                    used = gb(sum(v.guest.mounts[m][1] for m in on_disk) / GIB)
-                else:
-                    notes.append("mount spans several disks; used space is on the VM row")
-            peak_iops, peak_mbps = d.peak()
-            if d.hourly is None:
-                notes.append(d.metric_note)
-            rows.append([v.name, v.resource_group, d.name, dd.lun if v.cloud == "azure" else None, dd.device, d.kind,
-                         d.price_tier, d.size_gb, d.iops, d.mbps, gb(peak_iops), gb(peak_mbps), ", ".join(on_disk),
-                         used, d.price, "; ".join(n for n in notes if n)])
-    return rows
-
-
-def unattached_rows(disks: List[Disk], names: Dict[str, str], now: datetime, clouds: List[str]) -> Tuple[list, list]:
-    rows = []
-    for d in sorted((d for d in disks if d.state.lower() == "unattached"), key=lambda d: (-(d.price or 0), d.name)):
-        detached, created, note = parse_time(d.detached), parse_time(d.created), d.price_note
-        days = (now - detached).days if detached else None
-        if days is None:
-            why = "" if "azure" not in clouds else ("AWS does not record when a volume was detached" if d.cloud == "aws"
-                                                    else "Azure did not record when it was detached")
-            when = f"created {created:%Y-%m-%d}" if created else ""
-            note = "; ".join(x for x in (note, why, when) if x)
-        rows.append([names.get(d.subscription, d.subscription), d.resource_group, d.name, d.region, d.kind,
-                     d.price_tier, d.size_gb, d.price, days, note])
-    known = [r[7] for r in rows if r[7] is not None]
-    unknown = len(rows) - len(known)
-    total = ["TOTAL", "", "", "", "", "", sum(r[6] for r in rows), r2(sum(known)) if known else None, None,
-             f"{unknown} disk(s) not priced" if unknown else ""]
-    return rows, total
-
-
-def summary_rows(run: dict, vms: List[Vm], disks: List[Disk]) -> Tuple[list, set]:
-    """Two columns, Item and Value, in titled sections."""
-    rows, bold = [], set()
-
-    def section(title: str) -> None:
-        bold.add(len(rows))
-        rows.append([title, ""])
-
-    def item(label: str, value, fmt: str = "text") -> None:
-        rows.append([label, (value, fmt)])
-
-    with_data = [v for v in vms if v.data]
-    linux = [v for v in with_data if v.linux]
-    attached = attached_once(with_data)
-    spend = priced(attached)
-    linux_spend = priced(attached_once(linux))
-    savings = [v for v in with_data if v.saving]
-    total_saving = r2(sum(v.saving for v in savings)) if savings else None
-    unestimated = [v for v in linux if v.saving is None and not v.no_saving and v.lane != "Not supported"]
-
-    section("Run")
-    for scan in run["scans"]:
-        scanned = [s for s in scan.scopes if not s.note]
-        noted = [s for s in scan.scopes if s.note] + scan.skipped
-        if scan.cloud == "azure":
-            item("Directory (tenant)", scan.label)
-            item("Subscriptions scanned", len(scanned), "int")
-            item("Subscriptions with VMs or disks", ", ".join(s.name for s in scanned if s.vms or s.disks) or "none")
-            for s in noted:
-                item(f"Not scanned: {s.name} ({s.id})", s.note)
-        else:
-            item("AWS account", scan.label)
-            item("Regions scanned", len(scanned), "int")
-            item("Regions with VMs or disks", ", ".join(s.name for s in scanned if s.vms or s.disks) or "none")
-            for note, names in grouped(noted).items():
-                item(f"Not scanned: {', '.join(names)}", note)
-    item("Run on", run["when"])
-    item("Script version", VERSION)
-
-    section("Estate")
-    item("VMs", len(vms), "int")
-    item("VMs running", sum(1 for v in vms if v.running), "int")
-    item("VMs with data disks", len(with_data), "int")
-    item("Data disks attached", len(attached), "int")
-    item("Data-disk capacity, GB", sum(dd.size_gb for dd in attached), "int")
-    item("Data-disk spend today, $/mo", r2(sum(spend)) if spend else None, "usd")
-    item("of which on Linux VMs, $/mo", r2(sum(linux_spend)) if linux_spend else None, "usd")
-    unpriced = len(attached) - len(spend)
-    if unpriced:
-        item("Data disks not priced", f"{unpriced} (see the Reason column on the VMs sheet)")
-
-    section("Zoorik Amoeba")
-    if total_saving is None:
-        item("Estimated saving, $/mo", no_saving_text(vms))
-    else:
-        item("Estimated saving, $/mo", total_saving, "usd")
-        item("VMs with a saving", len(savings), "int")
-        item("Saving as share of data-disk spend", total_saving / sum(spend) if spend else None, "pct")
-    unestimated_spend = priced(attached_once([v for v in unestimated if v.current is not None]))
-    if unestimated_spend:
-        item("Spend on Linux VMs not yet estimated, $/mo", r2(sum(unestimated_spend)), "usd")
-    for lane in ("Ready", "Needs work", "Not supported", "Not checked"):
-        count = sum(1 for v in with_data if v.lane == lane)
-        if count:
-            item(f"Lane: {lane}", count, "int")
-    item("VMs with disk usage read", sum(1 for v in linux if v.guest and v.guest.luns), "int")
-    why_not: Dict[str, int] = {}
-    for v in linux:
-        if not (v.guest and v.guest.luns) and v.guest_note:
-            why_not[v.guest_note] = why_not.get(v.guest_note, 0) + 1
-    for note, count in sorted(why_not.items(), key=lambda kv: -kv[1]):
-        item(f"Not read: {note}", count, "int")
-
-    section("Unattached disks (not part of the Amoeba saving)")
-    loose = [d for d in disks if d.state.lower() == "unattached"]
-    loose_spend = [d.price for d in loose if d.price is not None]
-    item("Unattached disks", len(loose), "int")
-    item("Unattached capacity, GB", sum(d.size_gb for d in loose), "int")
-    item("Unattached spend, $/mo", r2(sum(loose_spend)) if loose_spend or not loose else None, "usd")
-    if len(loose) > len(loose_spend):
-        item("Unattached disks not priced", f"{len(loose) - len(loose_spend)} (see the Unattached disks sheet)")
-
-    section("Next step")
-    item("Please e-mail this file to", SEND_TO)
-    return rows, bold
-
-
-def grouped(scopes: List[Subscription]) -> Dict[str, List[str]]:
-    """Scopes by the reason they were not scanned: one line for every region an account policy refuses."""
-    out: Dict[str, List[str]] = {}
-    for s in scopes:
-        out.setdefault(s.note, []).append(s.name)
-    return out
-
-
-BAND_TEXT = (f"After the move, Amoeba keeps the pool {BAND_LOW * 100:.0f}-{BAND_HIGH:.0%} full as the data grows "
-             "and shrinks.")
-
-
-def azure_about() -> Dict[str, str]:
-    return {
-        "The saving": "For each Linux VM: used space is read inside the VM (df). Zoorik Amoeba moves the "
-                      "VM's data mounts onto one btrfs pool sized to the data: pool size "
-                      f"= used + 20% (at least {HEADROOM_MIN_GIB} GB), rounded up, laid out as Amoeba plans "
-                      "it (2 anchor disks and 3 to 6 equal elastic disks; on VMs with few free data-disk slots, "
-                      "1 anchor and up to 3 elastics). A Premium SSD v2 pool adds one 8 GB disk. In a Premium SSD "
-                      f"pool every disk is a Premium SSD size and elastics are at least {ELASTIC_FLOOR_V1_GIB} GB. "
-                      "Saving = today's list price of the disks the pool replaces - the pool's list price. "
-                      + BAND_TEXT,
-        "Pool disks": "Premium SSD v2 wherever the VM's region and zone offer it (as Azure lists it for your "
-                      "subscription; a VM without a zone also needs a region where Microsoft supports nonzonal "
-                      "Premium SSD v2), otherwise Premium SSD. Pool disks are locally redundant (LRS).",
-        "Performance": "Measured peak = the highest hourly figure of the last 14 days in Azure Monitor, where each "
-                       "hour's figure is its busiest minute (Maximum) of Composite Disk Read/Write Operations/sec "
-                       "and Bytes/sec, reads and writes added and summed over the disks the pool replaces. Each "
-                       "Premium SSD v2 disk includes 3,000 IOPS and 125 MB/s; more is priced in only when the "
-                       "measured peak x 1.3, shared across the pool's disks, needs it, and never more than the VM "
-                       "can drive. A Premium SSD disk has the fixed IOPS and MB/s of its size (bursting not "
-                       "counted). Where a Premium SSD pool cannot carry the measured peak x 1.3, the mount with the "
-                       "highest peak IOPS (then MB/s) stays on its disks, as Amoeba leaves it, and the pool is "
-                       "sized again for the others. If no mount is left, the VM is not estimated.",
-        "Prices": "Public Azure Retail Prices API (prices.azure.com): pay-as-you-go list prices in USD for each "
-                  f"disk's region, read at run time. A month is {HOURS_PER_MONTH} hours. Premium SSD, Standard SSD "
-                  "and Standard HDD are priced by tier (a Premium SSD set to a higher performance tier at that "
-                  "tier); Premium SSD v2 and Ultra Disk by provisioned GB, IOPS and MB/s.",
-        "Not included": "Negotiated discounts, reservations, savings plans and credits; transaction charges, "
-                        "bursting and snapshots; OS disks; unmanaged (VHD) disks; scale-set (uniform) instances; "
-                        "subscriptions in other Azure directories.",
-        "Lanes": "Ready: Amoeba can take the VM as it is. Needs work: a fix first (kernel 5.14 or later, "
-                 "Azure Disk Encryption, free data-disk slots). Not supported: Windows; VMs in a resource group "
-                 "another Azure service manages (such as Azure Databricks or an AKS node resource group); VM sizes "
-                 f"with fewer than {MIN_VM_SLOTS} data-disk slots; RHEL-family Linux; no btrfs in the kernel; no "
-                 "mounted data disk other than shared disks, which stay as they are. Not checked: disk usage was "
-                 "not read.",
-        "Units": "GB means GiB (2^30 bytes), the unit Azure sizes disks in. MB/s means 10^6 bytes per second.",
-    }
-
-
-def aws_about() -> Dict[str, str]:
-    return {
-        "The saving": "For each Linux instance: used space is read inside the instance (df). Zoorik Amoeba moves "
-                      "the instance's data mounts onto one btrfs pool of gp3 volumes, laid out as Amoeba plans a new "
-                      "pool on AWS. Pool size = used x 1.03 (btrfs's own space), held at most 90% full and with at "
-                      f"least {FREE_FLOOR_GIB} GB free, rounded up to whole GB; one reading has no growth or burst "
-                      f"to add. The pool is {MIN_MEMBERS} or more equal gp3 volumes, as few as the free volume slots "
-                      "allow (one kept spare), each no larger than the instance can empty in 2 hours when it is 80% "
-                      "full, reading and writing that data at 30% of the instance's EBS throughput, unless the slots "
-                      "need larger ones. Saving = today's list price of the volumes the pool replaces - the pool's "
-                      "list price. " + BAND_TEXT,
-        "Pool disks": "gp3, the EBS volume type Amoeba creates, in the instance's Availability Zone.",
-        "Performance": "Measured peak = the highest hourly figure of the last 14 days in CloudWatch (AWS/EBS), where "
-                       "each hour's figure is its busiest minute: the Maximum of the 1-minute VolumeReadOps, "
-                       "VolumeWriteOps, VolumeReadBytes and VolumeWriteBytes, divided by 60, reads and writes added "
-                       "and summed over the volumes the pool replaces. Amoeba itself plans from its own readings "
-                       "inside the instance; this estimate has CloudWatch's instead, the way the Azure estimate has "
-                       "Azure Monitor's. Each gp3 volume includes 3,000 IOPS and 125 MB/s. As Amoeba sets them, each "
-                       "volume gets the measured peak x 1.3 shared across the pool's volumes, and at least the write "
-                       "peak x 1.3, within what a gp3 volume of its size takes (500 IOPS per GB, up to 80,000; "
-                       "0.25 MB/s per IOPS, up to 2,000) and its share of what the instance can drive. Where the "
-                       "pool's volumes cannot carry that, the mount with the highest peak IOPS (then MB/s) stays on "
-                       "its volumes, as Amoeba leaves it, and the pool is sized again for the others. If no mount "
-                       "is left, the instance is not estimated.",
-        "Prices": "AWS Price List API (aws pricing get-products): on-demand list prices in USD for each volume's "
-                  "region, read at run time. EBS bills by the month: gp3 its GB, the IOPS above 3,000 and the MB/s "
-                  "above 125; io1 and io2 their GB and every provisioned IOPS (io2 in bands); gp2, st1 and sc1 "
-                  "their GB. Magnetic (standard) volumes bill each I/O request and are not priced.",
-        "Not included": "Negotiated discounts and credits; snapshots and I/O request charges; root volumes; "
-                        "instance store; Multi-Attach volumes, which stay as they are; regions not enabled for the "
-                        "account.",
-        "Lanes": "Ready: Amoeba can take the instance as it is. Needs work: a fix first (kernel 5.14 or later, "
-                 "free volume slots). Not supported: Windows; Xen instance types (Amoeba needs a Nitro type, where "
-                 "each EBS volume is an NVMe device named by its volume id); RHEL-family Linux, Amazon Linux "
-                 "included; no btrfs in the kernel; no mounted data volume other than Multi-Attach volumes, which "
-                 "stay as they are. Not checked: disk usage was not read, for example because Systems Manager "
-                 "does not manage the instance.",
-        "Units": "GB means GiB (2^30 bytes), the unit AWS sizes volumes in. MB/s means MiB/s (2^20 bytes per "
-                 "second), the unit gp3 throughput is set in.",
-    }
-
-
-READS = {"azure": "Azure Resource Graph (VMs, disks and resource groups), Azure Compute (VM size limits), Azure "
-                  "Monitor (disk metrics) and the public price list",
-         "aws": "EC2 (instances, volumes and instance types), Systems Manager (which instances it manages), "
-                "CloudWatch (volume metrics) and the AWS Price List API"}
-
-
-def ran_rows(cloud: str, ran_in: int, answer: str) -> List[Tuple[str, str]]:
-    """What ran in one cloud, and inside its VMs."""
-    name = CLOUD_NAMES[cloud]
-    machine, machines = ("VM", "VMs") if cloud == "azure" else ("instance", "instances")
-    inside = f"Inside the {machines}"
-    if not ran_in:
-        return [("What ran", f"Read calls only: {READS[cloud]}. Nothing in your {name} was changed, and nothing "
-                             "was sent anywhere."),
-                (inside, f"Nothing ran inside any {machine} ({answer}).")]
-    if cloud == "azure":
-        tool, how = "Azure Run Command", (
-            "through Azure Run Command (RunShellScript). On its side, Azure added its Run Command extension "
-            "(RunCommandLinux) to VMs that did not have it, kept a copy of the command and its output under "
-            "/var/lib/waagent on each VM, and logged each run in the activity log.")
-    else:
-        tool, how = "Systems Manager Run Command", (
-            f"through AWS Systems Manager Run Command ({SSM_DOCUMENT}). On its side, Systems Manager kept the "
-            "command and its output in its Run Command history, its agent kept a copy under /var/lib/amazon/ssm "
-            "on each instance, and CloudTrail logged each call.")
-    return [("What ran", f"Read calls: {READS[cloud]}; plus {tool} in {ran_in} {machine}(s), described under "
-                         f"{inside}. Nothing else in your {name} was changed, and nothing was sent anywhere."),
-            (inside, f"With your yes, this command, which only reads, ran in each of those {machines} {how}\n"
-                     + GUEST_SCRIPT[cloud])]
-
-
-def about_rows(run: dict) -> list:
-    scans = run["scans"]
-    both = len(scans) > 1
-    names = " and ".join(CLOUD_NAMES[s.cloud] for s in scans)
-    rows = [("What this is", f"An estimate, not a quote. The figures come from your {names} and from list prices "
-                             "at the time of the run.")]
-    texts = {s.cloud: azure_about() if s.cloud == "azure" else aws_about() for s in scans}
-    for topic in ("The saving", "Pool disks", "Performance", "Prices", "Not included", "Lanes"):
-        rows += [(f"{topic} ({CLOUD_NAMES[c]})" if both else topic, t[topic]) for c, t in texts.items()]
-    rows += [("Used space", "Used GB is the space used on the data-disk mounts the pool would take, from df inside "
-                            "the VM. Mounted-disk utilization % = Used GB / the size of the data disks under those "
-                            "mounts; Provisioned GB counts every data disk."),
-             ("Blank cells", "A blank figure could not be known; the Reason or Note column says why.")]
-    rows += [(f"Units ({CLOUD_NAMES[c]})" if both else "Units", t["Units"]) for c, t in texts.items()]
-    for s in scans:
-        ran_in = len(RUN_COMMAND_SENT if s.cloud == "aws" else RUN_COMMAND_STARTED["azure"])
-        rows += [(f"{topic} ({CLOUD_NAMES[s.cloud]})" if both else topic, detail)
-                 for topic, detail in ran_rows(s.cloud, ran_in, s.guest_answer)]
-    rows.append(("Prepared by", f"Zoorik Amoeba: disk assessment {VERSION}. Run it again: {ONE_LINER}  "
-                                f"Questions: {SEND_TO}"))
-    return [list(r) for r in rows]
-
-
-def build_sheets(run: dict, vms: List[Vm], disks: List[Disk]) -> list:
-    clouds = [s.cloud for s in run["scans"]]
-    names: Dict[str, str] = {}
-    for scan in run["scans"]:
-        prefix = f"{CLOUD_NAMES[scan.cloud]}: " if len(clouds) > 1 else ""
-        scoped = {s.id: s.name for s in scan.scopes} if scan.cloud == "azure" else {scan.label: scan.label}
-        names.update({k: prefix + v for k, v in scoped.items()})
-    summary, bold = summary_rows(run, vms, disks)
-    vm_cols, vm_list, vm_total = fit(VM_COLS, *vm_rows(vms, names), clouds)
-    disk_cols, disk_list, _ = fit(DISK_COLS, disk_rows(vms), None, clouds)
-    loose_cols, loose, loose_total = fit(UNATTACHED_COLS, *unattached_rows(disks, names, run["now"], clouds), clouds)
-    return [
-        Sheet("Summary", [("Item", "text"), ("Value", "text")], summary, bold_rows=bold, widths=[44, 90],
-              autofilter=False, preamble=[("Zoorik Amoeba: disk assessment", "title"), ("", "")]),
-        Sheet("VMs", vm_cols, vm_list, total=vm_total),
-        Sheet("Disks", disk_cols, disk_list),
-        Sheet("Unattached disks", loose_cols, loose, total=loose_total),
-        Sheet("About", [("Topic", "text"), ("Detail", "text")], about_rows(run), widths=[28, 120],
-              autofilter=False),
-    ]
-
-
-# ---------------------------------------------------------------- xlsx writer
-
-_FORMATS = {"text": 0, "int": 3, "usd": 164, "pct": 165}
-
-
-def _cell_styles() -> tuple:
-    """(numFmt, font, fill, border, wrap) per style, and the index of each style."""
-    xfs = [(0, 0, 0, 0, False), (0, 1, 2, 1, False), (0, 2, 0, 0, False), (0, 0, 0, 0, True)]
-    index = {"header": 1, "title": 2, "wrap": 3}
-    for bold in (False, True):
-        for fmt, num in _FORMATS.items():
-            index[(fmt, bold)] = len(xfs)
-            xfs.append((num, 1 if bold else 0, 0, 0, False))
-    return xfs, index
-
-
-_XFS, STYLE = _cell_styles()
-
-_NS = 'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"'
-_RNS = 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"'
-_BAD_XML = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f]")
+def staying(v: Vm) -> List[DataDisk]:
+    """The VM's other priced data disks, which stay as they are and cost the same today and after. A shared disk
+    belongs to more than one VM and is left out."""
+    pooled = {dd.lun for dd in v.pooled}
+    return [dd for dd in v.data if dd.lun not in pooled and dd.disk and not dd.disk.shared and dd.disk.price is not None]
 
 
 @dataclass
-class Sheet:
-    name: str
-    columns: list
-    rows: list
-    preamble: list = field(default_factory=list)
-    total: Optional[list] = None
-    widths: Optional[list] = None
-    autofilter: bool = True
-    bold_rows: set = field(default_factory=set)
+class Tally:
+    """Money in whole dollars and disk space in GB, of all the data disks of VMs in the saving: each VM's today and
+    after cost is rounded first, so every sum adds up."""
+    today: int = 0
+    after: int = 0
+    paid: int = 0
+    pool: int = 0
+    disks: int = 0
+
+    @property
+    def saving(self) -> int:
+        return self.today - self.after
 
 
-def col_letter(i: int) -> str:
-    s = ""
-    i += 1
-    while i:
-        i, r = divmod(i - 1, 26)
-        s = chr(65 + r) + s
-    return s
+def tally(vms: List[Vm]) -> Tally:
+    t = Tally()
+    for v in vms:
+        stay = staying(v)
+        same = half_up(sum(dd.disk.price for dd in stay))
+        t.today += half_up(v.today) + same
+        t.after += half_up(v.pool_cost) + same
+        t.paid += sum(dd.size_gb for dd in v.pooled + stay)
+        t.pool += v.pool_gb + sum(dd.size_gb for dd in stay)
+        t.disks += len(v.pooled) + len(stay)
+    return t
 
 
-def cell_xml(ref: str, value, style: int) -> str:
-    if value is None or value == "":
-        return ""
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        if value != value or value in (float("inf"), float("-inf")):
-            return ""
-        return f'<c r="{ref}" s="{style}"><v>{value!r}</v></c>'
-    text = escape(_BAD_XML.sub("", str(value))[:32767])
-    return f'<c r="{ref}" s="{style}" t="inlineStr"><is><t xml:space="preserve">{text}</t></is></c>'
+def where(vms: List[Vm]) -> str:
+    """The VMs' region, or how many regions they are in."""
+    regions = {v.region for v in vms}
+    return regions.pop() if len(regions) == 1 else f"{len(regions)} regions"
 
 
-def shown_length(value, fmt: str) -> int:
-    if isinstance(value, tuple):
-        value, fmt = value
-    if value is None:
-        return 0
-    if isinstance(value, str):
-        return len(value)
-    if fmt == "int":
-        return len(f"{value:,.0f}")
-    if fmt == "pct":
-        return len(f"{value * 100:.1f}%")
-    if fmt == "usd":
-        return len(f"${value:,.2f}")
-    return len(str(value))
+def why(vm: Vm, money: bool) -> str:
+    """The VM's reasons as one line, capitalized unless it opens with a name such as t2.large. A report with list
+    prices says why a VM's cost is unknown; one without names the reason once, above the table."""
+    reasons = [r for r in vm.reasons if not money or r != NO_PRICE]
+    if money and vm.price_note:
+        reasons.append(f"today's cost unknown: {vm.price_note}")
+    text = "; ".join(reasons)
+    return text[:1].upper() + text[1:] if re.match(r"[a-z']+ ", text) else text
 
 
-def sheet_xml(s: Sheet) -> tuple:
-    head = len(s.preamble) + 1
-    last_col = col_letter(len(s.columns) - 1)
-    rows = s.rows + ([s.total] if s.total else [])
-    widths = s.widths or [min(60, max([len(name)] + [shown_length(r[i], fmt) for r in rows]) + 2)
-                          for i, (name, fmt) in enumerate(s.columns)]
-    out = [f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<worksheet {_NS} {_RNS}>',
-           '<sheetViews><sheetView workbookViewId="0" showGridLines="0">'
-           f'<pane ySplit="{head}" topLeftCell="A{head + 1}" activePane="bottomLeft" state="frozen"/>'
-           '<selection pane="bottomLeft"/></sheetView></sheetViews>',
-           '<sheetFormatPr defaultRowHeight="15"/><cols>']
-    out += [f'<col min="{i + 1}" max="{i + 1}" width="{w}" customWidth="1"/>' for i, w in enumerate(widths)]
-    out.append("</cols><sheetData>")
-    for r, (text, style) in enumerate(s.preamble, 1):
-        out.append(f'<row r="{r}">{cell_xml(f"A{r}", text, STYLE[style] if style else 0)}</row>')
-    out.append(f'<row r="{head}">' + "".join(cell_xml(f"{col_letter(i)}{head}", name, STYLE["header"])
-                                             for i, (name, _) in enumerate(s.columns)) + "</row>")
-    body = [(row, k in s.bold_rows) for k, row in enumerate(s.rows)] + ([(s.total, True)] if s.total else [])
-    for n, (row, bold) in enumerate(body, head + 1):
-        cells = []
-        for i, (value, (_, fmt)) in enumerate(zip(row, s.columns)):
-            if isinstance(value, tuple):
-                value, fmt = value
-            last = i == len(s.columns) - 1
-            style = STYLE["wrap"] if s.widths and fmt == "text" and last and not bold else STYLE[(fmt, bold)]
-            cells.append(cell_xml(f"{col_letter(i)}{n}", value, style))
-        out.append(f'<row r="{n}">{"".join(cells)}</row>')
-    out.append("</sheetData>")
-    ref = f"A{head}:{last_col}{head + len(s.rows)}" if s.autofilter and s.rows else ""
-    if ref:
-        out.append(f'<autoFilter ref="{ref}"/>')
-    out.append("</worksheet>")
-    return "".join(out), ref
+def report(scans: List[Scan], vms: List[Vm], now: datetime) -> Tuple[bytes, str]:
+    """The PDF report on the VMs with data disks, and the terminal's line about its saving."""
+    names = {s.id: s.name for scan in scans if scan.cloud == "azure" for s in scan.scopes}
+    accounts: Dict[Tuple[str, str], List[Vm]] = {}
+    for v in vms:
+        accounts.setdefault((v.cloud, v.subscription), []).append(v)
+    clouds = [c for c in CLOUD_NAMES if any(cloud == c for cloud, _ in accounts)]
+    date = f"{now.day} {now:%B %Y}"
+    rep = Report("Block storage cost assessment", f"{' and '.join(CLOUD_NAMES[c] for c in clouds)} \xb7 "
+                 f"{plural(len(accounts), 'account')} \xb7 {date}", date,
+                 f"Zoorik cost assessment \xb7 {plural(len(accounts), 'account')} \xb7 {date}")
+    in_saving = sorted((v for v in vms if v.saving), key=lambda v: (-tally([v]).saving, v.name))
+    money = any(v.current is not None or v.saving for v in vms)
+    left = sorted((v for v in vms if not v.saving), key=lambda v: (v.current is None, -(v.current or 0), v.name))
+    section = 1
+    if in_saving:
+        total = tally(in_saving)
+        pct = percent(total.saving, total.today)
+        groups: Dict[Tuple[str, str], List[Vm]] = {}
+        for v in in_saving:
+            groups.setdefault((v.cloud, v.subscription), []).append(v)
+        rows = sorted(((names.get(sub, sub), cloud, group, tally(group)) for (cloud, sub), group in groups.items()),
+                      key=lambda r: (-r[3].saving, r[0]))
+        tb = total.paid >= 1000
+        counts = [sum(cloud == c for cloud, _ in accounts) for c in clouds]
+        split = " \xb7 ".join(f"{n} {CLOUD_NAMES[c]}" if len(clouds) > 1 and max(counts) > 1 else CLOUD_NAMES[c]
+                              for c, n in zip(clouds, counts))
+        rep.add(headline(["Reduce your disk bill by ", (f"{pct}%", True, GREEN_INK)]))
+        rep.add(lede([f"{plural(len(in_saving), 'VM')}, {plural(total.disks, 'data disk')}: ",
+                      (usd(total.today) + " a month", True), " today, ", (usd(total.after), True),
+                      " after Amoeba rightsizes them."]), 3 * MM)
+        rep.add(Kpis([(usd(total.saving), f"saved every month,\nabout {usd(12 * total.saving)} a year", GREEN_INK),
+                      (f"\u2212{pct}%" if pct else "0%", "disk bill,\nthese VMs", GREEN_INK),
+                      (f"{total.paid / 1000:.1f} \u2192 {total.pool / 1000:.1f}" if tb
+                       else f"{total.paid:,} \u2192 {total.pool:,}", f"disk space you\npay for, {'TB' if tb else 'GB'}",
+                       INK),
+                      (str(len(accounts)), ("accounts" if len(accounts) > 1 else "account") + "\n" + split, INK)]),
+                6 * MM)
+        if len(rows) > 1:
+            top = max(t.today for _, _, _, t in rows)
+            # Today and After widen to fit the total, the widest figure, and the Cost column gives up the room.
+            cols = [.2382, .1934, .2767, .0924, .0736, .1257]
+            for k, figure in ((3, total.today), (4, total.after)):
+                extra = max(0.0, (text_width(usd(figure), 9, True) + 9) / (WIDTH - 22.5) - cols[k])
+                cols[k], cols[2] = cols[k] + extra, cols[2] - extra
+            rep.add(Card(list(zip(cols, "lrlrrr")), ["Account", "Disk space", "Cost", "Today", "After", "Saving"],
+                         [[Cell(name, f"{CLOUD_NAMES[cloud]} \xb7 {where(group)} \xb7 {plural(len(group), 'VM')}",
+                                bold=True), f"{space(t.paid)} \u2192 {space(t.pool)}",
+                           Cell(art=pair_bars(t.today, t.after, top)), usd(t.today), usd(t.after),
+                           Cell(less(t.saving), f"{percent(t.saving, t.today)}% of its bill", True, GREEN_INK)]
+                          for name, cloud, group, t in rows],
+                         [f"All {len(rows)} accounts" if len(rows) == len(accounts) else "Total",
+                          f"{space(total.paid)} \u2192 {space(total.pool)}", "", usd(total.today), usd(total.after),
+                          Cell(less(total.saving), color=GREEN_INK)],
+                         title="Savings by account", aside="a month, at list prices",
+                         legend=[("Today", SLATE), ("After Amoeba", BLUE)]), GAP)
+        rep.add(Section(section, "Savings by account and VM"), GAP, keep=True)
+        rep.add(Legend([("Disk space you pay for today", RULE), ("Used", BLUE),
+                        ("After Amoeba rightsizes", MINT, 10.5, 5.25, True)]), SEC_GAP, keep=True)
+        for i, (name, cloud, group, t) in enumerate(rows):
+            lines = []
+            for v in group:
+                vt = tally([v])
+                lines.append([Cell(v.name, f"{vm_size(v)} \xb7 {disk_sizes(v.pooled + staying(v))}", bold=True),
+                              Cell(art=space_bar(vt.paid, v.used_gb, vt.pool)),
+                              Cell(space(v.used_gb) + " used", f"{space(vt.paid)} \u2192 {space(vt.pool)}"),
+                              usd(vt.today), usd(vt.after),
+                              Cell(less(vt.saving), bold=True, color=GREEN_INK) if vt.saving else "$0"])
+            meta = f"{CLOUD_NAMES[cloud]} \xb7 {where(group)} \xb7 {plural(len(group), 'VM')} \xb7 {space(t.paid)} " \
+                   f"\u2192 {space(t.pool)}"
+            rep.add(Card([(.24, "l"), (.26, "l"), (.16, "r"), (.11, "r"), (.11, "r"), (.12, "r")],
+                         ["VM", "Disk space", "Used\npaid for \u2192 after", "Today", "After", "Saving"], lines,
+                         name=name, meta=meta, pill=f"{less(t.saving)} a month \xb7 {percent(t.saving, t.today)}%"),
+                    CARD_GAP if i else SEC_GAP)
+        section += 1
+        line = f"{usd(total.saving)} a month on {plural(len(in_saving), 'VM')}, {pct}% of their disk bill"
+    else:
+        disks = list({dd.disk.id if dd.disk else (v.id, dd.lun): dd for v in vms for dd in v.data}.values())
+        known = all(dd.disk and dd.disk.price is not None for dd in disks)
+        rep.add(headline("No saving estimated yet"))
+        rep.add(lede([f"{plural(len(vms), 'VM')}, {plural(len(disks), 'data disk')}: ",
+                      (usd(half_up(sum(dd.disk.price for dd in disks))) + " a month", True) if known
+                      else (space(sum(dd.size_gb for dd in disks)), True),
+                      (" today." if known else " of disk space you pay for.") + " The reasons are below."]), 3 * MM)
+        if not money:
+            rep.add(Text("No list prices: " + "; ".join(sorted({v.price_note for v in vms if v.price_note})) + ".",
+                         8.25, MUTED))
+        line = "none yet; the report gives the reason for each VM"
+    if left:
+        rep.add(Section(section, "Not in the saving yet"), GAP, keep=True)
+        rep.add(Card([(.2115, "l"), (.6883, "l"), (.1002, "r")] if money else [(.2115, "l"), (.7885, "l")],
+                     ["VM", "Why", "Today"] if money else ["VM", "Why"],
+                     [[Cell(v.name, names.get(v.subscription, v.subscription), bold=True), why(v, money)]
+                      + ([Cell("not priced", color=MUTED) if v.current is None else usd(half_up(v.current))] if money
+                         else []) for v in left]), SEC_GAP)
+    rep.add(NextSteps("Next steps", [
+        "1. Email this PDF to ", (SEND_TO, True, WHITE, "mailto:" + SEND_TO),
+        ".  2. Book 30 minutes: ", ("cal.com/zoorik/talk", True, WHITE, "https://cal.com/zoorik/talk"),
+        ".   3. Connect Amoeba to your accounts and see these numbers live in the Amoeba console."]), GAP, keep=True)
+    rep.add(fine(("Data disks only, at public list prices. An estimate, not a quote." if money else "Data disks only.")
+                 + " The script read your accounts and sent nothing."), SEC_GAP)
+    return rep.pdf(), line
 
 
-def styles_xml() -> str:
-    xfs = "".join(
-        f'<xf numFmtId="{num}" fontId="{font}" fillId="{fill}" borderId="{border}" xfId="0" applyNumberFormat="1" '
-        'applyFont="1" applyFill="1" applyBorder="1"'
-        + ('><alignment wrapText="1" vertical="top"/></xf>' if wrap else "/>")
-        for num, font, fill, border, wrap in _XFS)
-    return ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
-            f'<styleSheet {_NS}><numFmts count="2"><numFmt numFmtId="164" formatCode="&quot;$&quot;#,##0.00"/>'
-            '<numFmt numFmtId="165" formatCode="0.0%"/></numFmts>'
-            '<fonts count="3"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/>'
-            '<name val="Calibri"/></font><font><b/><sz val="14"/><name val="Calibri"/></font></fonts>'
-            '<fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/>'
-            '</fill><fill><patternFill patternType="solid"><fgColor rgb="FFE8EEF7"/><bgColor indexed="64"/>'
-            '</patternFill></fill></fills><borders count="2"><border><left/><right/><top/><bottom/><diagonal/></border>'
-            '<border><left/><right/><top/><bottom style="thin"><color rgb="FF9AA5B1"/></bottom><diagonal/></border>'
-            '</borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
-            f'<cellXfs count="{len(_XFS)}">{xfs}</cellXfs><cellStyles count="1">'
-            '<cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>')
+# ---------------------------------------------------------------- pdf writer
+
+MM, PX = 72 / 25.4, 0.75
+PAGE_W, PAGE_H, SIDE = 210 * MM, 297 * MM, 16 * MM
+WIDTH = PAGE_W - 2 * SIDE
+GAP, CARD_GAP, SEC_GAP = 7 * MM, 4 * MM, 3 * MM
+INK, BODY, MUTED, RULE, RULE2, PANEL = "#0F1222", "#3A3F55", "#6B7086", "#E4E7F2", "#EFF1F8", "#F6F7FB"
+NAVY, DEEP, BONE, LILAC, HAZE, UNDERLINE = "#050B3D", "#070F52", "#FAF7F3", "#D9D6EE", "#D6DAF5", "#8E98EB"
+BLUE, GREEN, GREEN_INK, MINT, SLATE, WHITE = "#3B5BF5", "#12A97A", "#117D60", "#E3F5EF", "#5B6396", "#FFFFFF"
+
+# Adobe AFM advance widths of WinAnsi codes 32-255, in 1/1000 em
+_HELVETICA = [int(w) for w in (
+    "278 278 355 556 556 889 667 191 333 333 389 584 278 333 278 278 556 556 556 556 556 556 556 556 556 556 "
+    "278 278 584 584 584 556 1015 667 667 722 722 667 611 778 722 278 500 667 556 833 722 778 667 778 722 667 "
+    "611 722 667 944 667 667 611 278 278 278 469 556 333 556 556 500 556 556 278 556 556 222 222 500 222 833 "
+    "556 556 556 556 333 500 278 556 500 722 500 500 500 334 260 334 584 350 556 350 222 556 333 1000 556 556 "
+    "333 1000 667 333 1000 350 611 350 350 222 222 333 333 350 556 1000 333 1000 500 333 944 350 500 667 278 "
+    "333 556 556 556 556 260 556 333 737 370 556 584 333 737 333 400 584 333 333 333 556 537 278 333 333 365 "
+    "556 834 834 834 611 667 667 667 667 667 667 1000 722 667 667 667 667 278 278 278 278 722 722 778 778 778 "
+    "778 778 584 778 722 722 722 722 667 667 611 556 556 556 556 556 556 889 500 556 556 556 556 278 278 278 "
+    "278 556 556 556 556 556 556 556 584 611 556 556 556 556 500 556 500").split()]
+_HELVETICA_BOLD = [int(w) for w in (
+    "278 333 474 556 556 889 722 238 333 333 389 584 278 333 278 278 556 556 556 556 556 556 556 556 556 556 "
+    "333 333 584 584 584 611 975 722 722 722 722 667 611 778 722 278 556 722 611 833 722 778 667 778 722 667 "
+    "611 722 667 944 667 667 611 333 278 333 584 556 333 556 611 556 611 556 333 611 611 278 278 556 278 889 "
+    "611 611 611 611 389 556 333 611 556 778 556 556 500 389 280 389 584 350 556 350 278 556 500 1000 556 556 "
+    "333 1000 667 333 1000 350 611 350 350 278 278 500 500 350 556 1000 333 1000 556 333 944 350 500 667 278 "
+    "333 556 556 556 556 280 556 333 737 370 556 584 333 737 333 400 584 333 333 333 611 556 278 333 333 365 "
+    "556 834 834 834 611 722 722 722 722 722 722 1000 722 667 667 667 667 278 278 278 278 722 722 778 778 778 "
+    "778 778 584 778 722 722 722 722 667 667 611 556 556 556 556 556 556 889 556 556 556 556 556 278 278 278 "
+    "278 611 611 611 611 611 611 611 584 611 611 611 611 611 556 611 556").split()]
+# The bone logo as PDF paths, in its SVG's 1725 x 430 units, y up
+_LOGO = (
+    "180 380 m 205 404 l 229 380 l 205 355 l h 78 329 m 84 370 l 126 363 l 119 322 l h 30 235 m 15 266 l 46 282 "
+    "l 62 251 l h 47 122 m 10 141 l 29 178 l 66 159 l h 122 48 m 87 43 l 82 77 l 116 83 l h 234 29 m 205 0 l "
+    "175 29 l 205 59 l h 328 77 m 322 43 l 288 48 l 293 83 l h 380 178 m 399 141 l 362 122 l 343 159 l h 364 "
+    "282 m 395 266 l 379 235 l 348 251 l h 284 363 m 325 370 l 332 329 l 290 322 l h 185 325 m 205 345 l 225 "
+    "325 l 205 305 l h 84 222 m 71 248 l 96 261 l 109 235 l h 150 95 m 122 91 l 118 119 l 146 123 l h 292 119 m "
+    "287 91 l 259 95 l 264 123 l h 313 261 m 338 248 l 326 222 l 300 235 l h 291 204 m 291 156 253 118 205 118 "
+    "c 157 118 118 156 118 204 c 118 252 157 291 205 291 c 253 291 291 252 291 204 c h 718 316 m 718 277 l 609 "
+    "135 l 720 135 l 714 92 l 547 92 l 547 131 l 656 274 l 556 274 l 556 316 l h 953 205 m 953 181 949 160 940 "
+    "142 c 932 124 920 111 904 101 c 888 91 869 86 848 86 c 815 86 789 96 770 117 c 751 138 742 168 742 205 c "
+    "742 228 746 249 755 266 c 763 284 776 298 792 308 c 807 318 826 323 848 323 c 881 323 907 312 925 291 c "
+    "944 270 953 241 953 205 c h 799 205 m 799 178 803 158 811 146 c 819 133 832 127 848 127 c 864 127 876 133 "
+    "884 146 c 892 159 896 178 896 205 c 896 231 892 250 884 263 c 876 275 864 282 848 282 c 816 282 799 256 "
+    "799 205 c h 1199 205 m 1199 181 1194 160 1186 142 c 1177 124 1165 111 1149 101 c 1134 91 1115 86 1093 86 c "
+    "1060 86 1034 96 1016 117 c 997 138 988 168 988 205 c 988 228 992 249 1000 266 c 1009 284 1021 298 1037 308 "
+    "c 1053 318 1072 323 1094 323 c 1127 323 1152 312 1171 291 c 1189 270 1199 241 1199 205 c h 1045 205 m 1045 "
+    "178 1049 158 1057 146 c 1065 133 1077 127 1093 127 c 1109 127 1121 133 1129 146 c 1137 159 1141 178 1141 "
+    "205 c 1141 231 1137 250 1129 263 c 1121 275 1109 282 1094 282 c 1061 282 1045 256 1045 205 c h 1380 319 m "
+    "1371 267 l 1364 269 1358 269 1351 269 c 1338 269 1327 265 1320 255 c 1312 246 1306 231 1302 212 c 1302 92 "
+    "l 1247 92 l 1247 316 l 1294 316 l 1299 272 l 1305 288 1313 301 1323 309 c 1333 318 1345 322 1358 322 c "
+    "1366 322 1374 321 1380 319 c h 1466 316 m 1466 92 l 1412 92 l 1412 316 l h 1473 397 m 1473 388 1470 380 "
+    "1464 374 c 1457 367 1449 364 1439 364 c 1429 364 1421 367 1415 374 c 1408 380 1405 388 1405 397 c 1405 406 "
+    "1408 414 1415 420 c 1421 427 1429 430 1439 430 c 1449 430 1457 427 1464 420 c 1470 414 1473 406 1473 397 c "
+    "h 1584 412 m 1584 92 l 1530 92 l 1530 406 l h 1718 316 m 1644 218 l 1725 92 l 1663 92 l 1586 215 l 1661 "
+    "316 l h f")
+
+_DRAWN = {"\u2192": ("\xae", 987, 900), "\u2212": ("-", 549, 584)}  # Symbol code and width, drawn width (1/1000 em)
 
 
-def write_xlsx(path: str, sheets: list) -> None:
-    """Write the sheets as a minimal .xlsx with the standard library only."""
-    sheets = [s for s in sheets if s.rows]
-    parts, names = {}, []
-    for i, s in enumerate(sheets, 1):
-        xml, ref = sheet_xml(s)
-        parts[f"xl/worksheets/sheet{i}.xml"] = xml
-        if ref:
-            absolute = re.sub(r"([A-Z]+)(\d+)", r"$\1$\2", ref)
-            names.append(f'<definedName name="_xlnm._FilterDatabase" localSheetId="{i - 1}" hidden="1">'
-                         f"'{s.name}'!{absolute}</definedName>")
-    sheet_list = "".join(f'<sheet name="{escape(s.name)}" sheetId="{i}" r:id="rId{i}"/>'
-                         for i, s in enumerate(sheets, 1))
-    parts["xl/workbook.xml"] = (f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<workbook {_NS} {_RNS}>'
-                                f'<bookViews><workbookView/></bookViews><sheets>{sheet_list}</sheets>'
-                                + (f"<definedNames>{''.join(names)}</definedNames>" if names else "") + "</workbook>")
-    rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
-    parts["xl/_rels/workbook.xml.rels"] = (
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
-        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-        + "".join(f'<Relationship Id="rId{i}" Type="{rel}/worksheet" Target="worksheets/sheet{i}.xml"/>'
-                  for i in range(1, len(sheets) + 1))
-        + f'<Relationship Id="rId{len(sheets) + 1}" Type="{rel}/styles" Target="styles.xml"/></Relationships>')
-    parts["xl/styles.xml"] = styles_xml()
-    parts["_rels/.rels"] = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
-                            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-                            f'<Relationship Id="rId1" Type="{rel}/officeDocument" Target="xl/workbook.xml"/>'
-                            '</Relationships>')
-    ct = "application/vnd.openxmlformats-officedocument.spreadsheetml"
-    parts["[Content_Types].xml"] = (
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
-        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
-        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
-        '<Default Extension="xml" ContentType="application/xml"/>'
-        f'<Override PartName="/xl/workbook.xml" ContentType="{ct}.sheet.main+xml"/>'
-        f'<Override PartName="/xl/styles.xml" ContentType="{ct}.styles+xml"/>'
-        + "".join(f'<Override PartName="/xl/worksheets/sheet{i}.xml" ContentType="{ct}.worksheet+xml"/>'
-                  for i in range(1, len(sheets) + 1)) + "</Types>")
-    order = ["[Content_Types].xml", "_rels/.rels", "xl/workbook.xml", "xl/_rels/workbook.xml.rels", "xl/styles.xml"]
-    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
-        for name in order + sorted(k for k in parts if k not in order):
-            z.writestr(name, parts[name])
+def _win(s: str) -> str:
+    """s in WinAnsi code points: the nearest letter or ? for a character it lacks; the arrow and minus stay."""
+    out = []
+    for ch in s:
+        if " " <= ch <= "~" or ch in _DRAWN:
+            out.append(ch)
+            continue
+        for c in (ch, unicodedata.normalize("NFKD", ch)[:1]):
+            try:
+                out.append(" " if c < " " or c == "\x7f" else c.encode("cp1252").decode("latin-1"))
+                break
+            except UnicodeEncodeError:
+                pass
+        else:
+            out.append("?")
+    return "".join(out)
+
+
+def _advance(t: str, size: float, bold: bool, spacing: float) -> float:
+    widths = _HELVETICA_BOLD if bold else _HELVETICA
+    return sum(_DRAWN[c][2] if c in _DRAWN else widths[ord(c) - 32] for c in t) * size / 1000 + spacing * len(t)
+
+
+def text_width(s: str, size: float, bold: bool = False, spacing: float = 0.0) -> float:
+    return _advance(_win(s), size, bold, spacing)
+
+
+def _metrics(size: float, lh: float = None) -> tuple:
+    """Line pitch and baseline offset in points, as the design's browser lays a line out (lh None: normal)."""
+    a, d = int(size / PX * 0.96875 + 0.5) * PX, int(size / PX * 0.2421875 + 0.5) * PX
+    box = a + d if lh is None else int(size * lh / PX) * PX
+    return box, (box - a - d) / 2 + a
+
+
+def _f(v: float, digits: int = 2) -> str:
+    return ("%.*f" % (digits, v)).rstrip("0").rstrip(".")
+
+
+def _rgb(c: str) -> str:
+    return " ".join(_f(int(c[i:i + 2], 16) / 255, 3) for i in (1, 3, 5))
+
+
+def _esc(s: str) -> str:
+    return s.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+
+def _path(x: float, y: float, w: float, h: float, r: float) -> str:
+    """A rectangle path from its bottom-left in page coordinates (y up), its corners rounded by r."""
+    r = max(0.0, min(r, w / 2, h / 2))
+    if not r:
+        return "%s %s %s %s re" % (_f(x), _f(y), _f(w), _f(h))
+    k, X, Y = r * 0.4477, x + w, y + h
+    pts = [(x + r, y), (X - r, y), (X - k, y, X, y + k, X, y + r), (X, Y - r), (X, Y - k, X - k, Y, X - r, Y),
+           (x + r, Y), (x + k, Y, x, Y - k, x, Y - r), (x, y + r), (x, y + k, x + k, y, x + r, y)]
+    return " ".join(" ".join(map(_f, p)) + (" m", " l", " c")[min(i, 1) + (len(p) > 2)] for i, p in enumerate(pts))
+
+
+class Pdf:
+    """A4 pages of drawing operators. x runs from the left edge and y down from the top edge, in points."""
+
+    def __init__(self):
+        self.pages = []
+
+    def page(self) -> None:
+        self.ops, self.annots = [], []
+        self.pages.append((self.ops, self.annots))
+
+    def text(self, x: float, y: float, s: str, size: float, color: str = INK, bold: bool = False, align: str = "l",
+             spacing: float = 0.0) -> float:
+        """One line with its baseline at y, aligned l, r or c on x. Returns its width."""
+        t = _win(s)
+        w = _advance(t, size, bold, spacing)
+        x -= {"l": 0, "r": w, "c": w / 2}[align]
+        ops, art, b = ["BT %s rg %s Tc" % (_rgb(color), _f(spacing))], [], PAGE_H - y
+        for run in re.findall("[\u2192\u2212]|[^\u2192\u2212]+", t):
+            if run in _DRAWN:
+                code, sym, drawn = _DRAWN[run]
+                ops.append("1 0 0 1 %s %s Tm 3 Tr %s Tz /F3 %s Tf (%s) Tj 0 Tr 100 Tz"
+                           % (_f(x), _f(b), _f(100 * drawn / sym), _f(size), code))
+                art.append(self._drawn(run, x, b, size, color, bold))
+            else:
+                ops.append("1 0 0 1 %s %s Tm /F%d %s Tf (%s) Tj"
+                           % (_f(x), _f(b), 2 if bold else 1, _f(size), _esc(run)))
+            x += _advance(run, size, bold, spacing)
+        if t:
+            self.ops.append(" ".join(ops) + " ET" + "".join(art))
+        return w
+
+    @staticmethod
+    def _drawn(c: str, x: float, b: float, size: float, color: str, bold: bool) -> str:
+        """Helvetica's own minus, or an arrow of the same weight across the middle of the figures."""
+        if c == "\u2212":
+            x0, y0, x1, y1 = (40, 197, 544, 309) if bold else (39, 216, 545, 289)
+            return " %s rg %s %s %s %s re f" % (_rgb(color), _f(x + x0 * size / 1000), _f(b + y0 * size / 1000),
+                                               _f((x1 - x0) * size / 1000), _f((y1 - y0) * size / 1000))
+        t, y, head = (0.112 if bold else 0.073) * size, b + 0.34 * size, 0.29 * size
+        tip = x + 0.82 * size - t * 0.7071
+        return " q %s RG %s w 0 J 0 j %s %s m %s %s l S %s %s m %s %s l %s %s l S Q" % (
+            _rgb(color), _f(t), _f(x + 0.08 * size), _f(y), _f(tip), _f(y), _f(tip - head), _f(y + head), _f(tip),
+            _f(y), _f(tip - head), _f(y - head))
+
+    def rect(self, x: float, y: float, w: float, h: float, fill: str = None, stroke: str = None, lw: float = PX,
+             r: float = 0.0) -> None:
+        """A rectangle from its top-left (x, y), filled and/or stroked on its edge, its corners rounded by r."""
+        self.ops.append("q %s%s%s %s Q" % ("%s rg " % _rgb(fill) if fill else "",
+                                            "%s RG %s w " % (_rgb(stroke), _f(lw)) if stroke else "",
+                                            _path(x, PAGE_H - y - h, w, h, r), "B" if fill and stroke else "f" if fill
+                                            else "S"))
+
+    def dashed(self, x: float, y: float, w: float, h: float, r: float, color: str = GREEN) -> None:
+        """A 1.5px dashed outline just inside the box, its dashes spread evenly and centred on each side."""
+        lw = 1.125
+        w, h, r = w - lw, h - lw, max(0.0, min(r - lw / 2, (w - lw) / 2, (h - lw) / 2))
+        around = 2 * (w + h) - (8 - 2 * math.pi) * r
+        period = around / max(8, 2 * round(around / (7.2 * lw)))
+        on = period * 0.62
+        self.ops.append("q %s RG %s w [%s %s] %s d %s S Q" % (
+            _rgb(color), _f(lw), _f(on), _f(period - on), _f(period - (w / 2 - r - on / 2) % period),
+            _path(x + lw / 2, PAGE_H - y - h - lw / 2, w, h, r)))
+
+    def line(self, x1: float, y1: float, x2: float, y2: float, color: str = RULE, lw: float = PX) -> None:
+        self.ops.append("q %s RG %s w %s %s m %s %s l S Q" % (_rgb(color), _f(lw), _f(x1), _f(PAGE_H - y1), _f(x2),
+                                                              _f(PAGE_H - y2)))
+
+    def link(self, x: float, y: float, w: float, h: float, uri: str) -> None:
+        self.annots.append("<< /Type /Annot /Subtype /Link /Rect [%s %s %s %s] /Border [0 0 0] /A << /S /URI /URI (%s) "
+                           ">> >>" % (_f(x), _f(PAGE_H - y - h), _f(x + w), _f(PAGE_H - y), _esc(uri)))
+
+    def logo(self, x: float, y: float, w: float) -> None:
+        """The bone Zoorik logo, w points wide, from its top-left (x, y)."""
+        s = w / 1725
+        self.ops.append("q %s rg %s 0 0 %s %s %s cm %s Q" % (_rgb(BONE), _f(s), _f(s), _f(x), _f(PAGE_H - y - 430 * s),
+                                                             _LOGO))
+
+    def save(self, title: str) -> bytes:
+        """The document: catalog, page tree, info, the three standard fonts, then each page and its content."""
+        objs = [b"<< /Type /Catalog /Pages 2 0 R /ViewerPreferences << /DisplayDocTitle true >> >>",
+                b"<< /Type /Pages /Kids [%s] /Count %d >>" % (
+                    " ".join("%d 0 R" % (7 + 2 * i) for i in range(len(self.pages))).encode(), len(self.pages)),
+                b"<< /Title <FEFF%s> /Producer (Zoorik) >>" % title.encode("utf-16-be").hex().upper().encode()]
+        objs += [b"<< /Type /Font /Subtype /Type1 /BaseFont /%s >>" % f for f in (
+            b"Helvetica /Encoding /WinAnsiEncoding", b"Helvetica-Bold /Encoding /WinAnsiEncoding", b"Symbol")]
+        for ops, annots in self.pages:
+            data = zlib.compress("\n".join(ops).encode("latin-1"))
+            page = ("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 %s %s] /Contents %d 0 R /Resources << /Font << "
+                    "/F1 4 0 R /F2 5 0 R /F3 6 0 R >> >>" % (_f(PAGE_W), _f(PAGE_H), len(objs) + 2))
+            objs.append((page + (" /Annots [%s]" % " ".join(annots) if annots else "") + " >>").encode())
+            objs.append(b"<< /Length %d /Filter /FlateDecode >>\nstream\n%s\nendstream" % (len(data), data))
+        out, offsets = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n"), []
+        for i, body in enumerate(objs, 1):
+            offsets.append(len(out))
+            out += b"%d 0 obj\n%s\nendobj\n" % (i, body)
+        xref = len(out)
+        out += b"xref\n0 %d\n0000000000 65535 f \n%s" % (len(objs) + 1, b"".join(b"%010d 00000 n \n" % o
+                                                                              for o in offsets))
+        out += b"trailer\n<< /Size %d /Root 1 0 R /Info 3 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objs) + 1, xref)
+        return bytes(out)
+
+
+def _span(sp, bold: bool, color: str) -> tuple:
+    if isinstance(sp, str):
+        return sp, bold, color, None
+    t, b, c, u = (tuple(sp) + (None, None, None))[:4]
+    return t, bold if b is None else b, c or color, u
+
+
+def wrap(spans, size: float, width: float, bold: bool = False, color: str = INK, spacing: float = 0.0) -> list:
+    """Spans in lines no wider than width, broken at spaces and newlines, after a hyphen only in a word wider than
+    the line, and inside a word only when the part alone is wider; a separator dot at either end of a line is left
+    out. A span is a str or (text, bold, color, url). Returns [(width, [(x, text, bold, color, url)])]."""
+    units, space, glue = [], 0, False
+    for sp in [spans] if isinstance(spans, str) else spans:
+        t, b, c, u = _span(sp, bold, color)
+        for tok in re.findall(r"\n| +|[^ \n-]*-|[^ \n-]+", t):
+            if tok == "\n":
+                units.append(None)
+                space, glue = 0, False
+            elif tok[0] == " ":
+                space, glue = space + len(tok), False
+            else:
+                if glue:
+                    units[-1][1].append((tok, b, c, u))
+                else:
+                    units.append((space, [(tok, b, c, u)]))
+                space, glue = 0, not tok.endswith("-")
+    lines, line, x, sw = [], [], 0.0, text_width(" ", size, False, spacing)
+    sized = [unit and [(p, text_width(p[0], size, p[1], spacing)) for p in unit[1]] for unit in units]
+    for i, unit in enumerate(units):
+        if unit is None:
+            lines.append((x, line))
+            line, x = [], 0.0
+            continue
+        pieces = sized[i]
+        uw, gap = sum(w for _, w in pieces), unit[0] * sw if line else 0.0
+        word, j = uw, i + 1
+        while (unit[0] or not i or units[i - 1] is None) and j < len(units) and units[j] and not units[j][0]:
+            word, j = word + sum(w for _, w in sized[j]), j + 1
+        if line and x + gap + (word if word <= width else uw) > width + 0.01:
+            lines.append((x, line))
+            line, x, gap = [], 0.0, 0.0
+        x += gap
+        for (t, b, c, u), w in pieces:
+            if uw <= width:
+                line.append((x, t, b, c, u))
+                x += w
+                continue
+            run = None
+            for ch in t:
+                cw = text_width(ch, size, b, spacing)
+                if line and x + cw > width + 0.01:
+                    lines.append((x, line))
+                    line, x, run = [], 0.0, None
+                if run is None:
+                    run = len(line)
+                    line.append((x, ch, b, c, u))
+                else:
+                    line[run] = line[run][:1] + (line[run][1] + ch,) + line[run][2:]
+                x += cw
+    lines.append((x, line))
+    for k, (w, ln) in enumerate(lines):
+        if len(ln) > 1 and ln[-1][1] == "\xb7":
+            ln = ln[:-1]
+            w = ln[-1][0] + text_width(ln[-1][1], size, ln[-1][2], spacing)
+        if len(ln) > 1 and ln[0][1] == "\xb7":
+            w, ln = w - ln[1][0], [(p[0] - ln[1][0],) + p[1:] for p in ln[1:]]
+        lines[k] = (w, ln)
+    return lines
+
+
+def _draw(pdf: Pdf, lines: list, x: float, top: float, width: float, size: float, metrics: tuple, align: str = "l",
+          spacing: float = 0.0) -> None:
+    """Lines from wrap() in a box at x, its top at top, metrics = (pitch, baseline offset)."""
+    y = top + metrics[1]
+    for w, pieces in lines:
+        x0 = x + {"l": 0, "r": width - w, "c": (width - w) / 2}[align]
+        for px, t, b, c, u in pieces:
+            pw = pdf.text(x0 + px, y, t, size, c, b, spacing=spacing)
+            if u:
+                pdf.line(x0 + px, y + size * 0.27 + 0.4, x0 + px + pw, y + size * 0.27 + 0.4, UNDERLINE)
+                pdf.link(x0 + px, y - size, pw, size * 1.3, u)
+        y += metrics[0]
+
+
+class Text:
+    """A paragraph of spans wrapped to the content width; lh is the line height as a multiple of size (None: normal)."""
+
+    def __init__(self, spans, size: float, color: str = INK, bold: bool = False, lh: float = None,
+                 spacing: float = 0.0):
+        self.lines, self.size, self.spacing = wrap(spans, size, WIDTH, bold, color, spacing), size, spacing
+        self.m = _metrics(size, lh)
+        self.h = len(self.lines) * self.m[0]
+
+    def draw(self, pdf: Pdf, x: float, y: float) -> None:
+        _draw(pdf, self.lines, x, y, WIDTH, self.size, self.m, spacing=self.spacing)
+
+
+def headline(spans) -> Text:
+    return Text(spans, 27, INK, True, 1.12, -0.675)
+
+
+def lede(spans) -> Text:
+    return Text(spans, 10.5, BODY, False, 1.6)
+
+
+def fine(spans) -> Text:
+    return Text(spans, 7.125, MUTED, False, 1.5)
+
+
+class Kpis:
+    """A row of KPI cards from [(value, label, value colour)]; a newline in a label starts its second line."""
+
+    def __init__(self, items: list):
+        self.items, self.w = items, (WIDTH - 6 * (len(items) - 1)) / len(items)
+        self.labels = [wrap(label, 7.875, self.w - 19.5, color=MUTED) for _, label, _ in items]
+        self.h = 42 + max(len(lines) for lines in self.labels) * _metrics(7.875, 1.4)[0]
+
+    def draw(self, pdf: Pdf, x: float, y: float) -> None:
+        for i, ((value, _, color), lines) in enumerate(zip(self.items, self.labels)):
+            cx = x + i * (self.w + 6)
+            pdf.rect(cx + PX / 2, y + PX / 2, self.w - PX, self.h - PX, PANEL, RULE, r=8.625)
+            pdf.text(cx + 9.75, y + 25.5, value, 16.5, color, True, spacing=-0.33)
+            _draw(pdf, lines, cx + 9.75, y + 33, self.w, 7.875, _metrics(7.875, 1.4))
+
+
+class Section:
+    """A numbered section heading."""
+
+    def __init__(self, n: int, title: str):
+        self.n, self.title, self.h = n, title, 19.5
+
+    def draw(self, pdf: Pdf, x: float, y: float) -> None:
+        pdf.rect(x, y, 19.5, 19.5, BLUE, r=9.75)
+        pdf.text(x + 9.75, y + 13.5, str(self.n), 9.75, WHITE, True, "c")
+        pdf.text(x + 27, y + 15.375, self.title, 15.75, INK, True, spacing=-0.236)
+
+
+class Legend:
+    """One line of keys: (label, fill) with a 10.5 x 5.25 swatch, or (label, fill, w, h, dashed)."""
+
+    def __init__(self, items: list):
+        self.items, self.h = items, 8.25
+
+    def draw(self, pdf: Pdf, x: float, y: float) -> None:
+        for item in self.items:
+            label, fill, w, h, dashed = tuple(item) + (10.5, 5.25, False)[len(item) - 2:]
+            pdf.rect(x, y + 6.75 - h, w, h, fill, r=1.5)
+            if dashed:
+                pdf.dashed(x, y + 6.75 - h, w, h, 1.5)
+            x += w + 3.75
+            x += pdf.text(x, y + 6.75, label, 7.125, MUTED) + 10.5
+
+
+def pair_bars(today: float, after: float, top: float):
+    """Art: the today bar (slate) over the after bar (blue), on one scale where top fills 112.5pt."""
+    def art(pdf, x, y, w):
+        for i, (v, color) in enumerate(((today, SLATE), (after, BLUE))):
+            if pdf and v > 0:
+                pdf.rect(x, y + 1.5 + 6.75 * i, min(112.5, w) * v / top, 5.25, color, r=2.625)
+        return 15.0
+    return art
+
+
+class Cell:
+    """A table cell: text wrapped to its column, a muted sub-line under it, and art under both. bold and color default
+    to the row's. art is a function (pdf, x, y, w) that draws from the cell's top-left within width w and returns its
+    height; with pdf None it only returns the height."""
+
+    def __init__(self, text: str = "", sub: str = "", bold: bool = None, color: str = None, art=None):
+        self.text, self.sub, self.bold, self.color, self.art = text, sub, bold, color, art
+
+
+class Card:
+    """A bordered card holding one table. cols are [(fraction of the width, "l" or "r")], head the column titles (a
+    newline breaks one), rows lists of Cell or str, total an optional bold last row under a rule. The card opens with
+    a title and a muted aside, or with a name, a muted meta line and a green pill; legend is Legend items. A card
+    taller than the space left splits between rows, and each part repeats the column titles."""
+
+    def __init__(self, cols: list, head: list, rows: list, total: list = None, title: str = "", aside: str = "",
+                 name: str = "", meta: str = "", pill: str = "", legend: list = None):
+        self.pad = (7.5, 9.0, 3.0) if name else (9.0, 10.5, 9.0)
+        self.inner = WIDTH - 2 * (PX + self.pad[1])
+        edges = [self.inner * sum(f for f, _ in cols[:i]) for i in range(len(cols) + 1)]
+        self.cols = [(x0, x1 - x0, a) for (_, a), x0, x1 in zip(cols, edges, edges[1:])]
+        self.title, self.aside, self.name, self.meta, self.pill = title, aside, name, meta, pill
+        self.legend, self.lines, self.first = Legend(legend) if legend else None, None, True
+        self.top_h = 16.5 if title else 0.0
+        if name:
+            room = self.inner - (text_width(pill, 8.25, True) + 27 if pill else 0)
+            if text_width(name, 10.5, True) + 6 + text_width(meta, 7.5) > room:
+                self.lines = wrap(name, 10.5, room, True), wrap(meta, 7.5, room, color=MUTED)
+            self.top_h = 3 + (max(16.5, 1.5 + 12.75 * len(self.lines[0]) + 9 * len(self.lines[1])) if self.lines
+                              else 16.5)
+        self.top_h += 16.75 if legend else 0
+        self.head = [wrap(t, 7.125, w - 9, color=MUTED) for t, (_, w, _) in zip(head, self.cols)]
+        self.head_h = 8.25 * max(len(lines) for lines in self.head) + 8.25
+        self.rows = [self._row(r, False) for r in rows] + ([self._row(total, True)] if total else [])
+        self._size()
+
+    def _row(self, cells: list, total: bool) -> tuple:
+        size, laid = 9.0 if total else 8.25, []
+        for cell, (_, w, _) in zip(cells, self.cols):
+            c = cell if isinstance(cell, Cell) else Cell(cell)
+            main = wrap(c.text, size, w - 9, total if c.bold is None else c.bold, c.color or INK) if c.text else []
+            sub = wrap(c.sub, 7.125, w - 9, color=MUTED) if c.sub else []
+            art = c.art(None, 0, 0, w - 9) if c.art else 0.0
+            laid.append((c, main, sub, len(main) * _metrics(size)[0] + 8.25 * len(sub) + art))
+        return 12 + max(cell[3] for cell in laid), total, size, laid
+
+    def _size(self) -> None:
+        self.h = 2 * PX + self.pad[0] + self.pad[2] + self.top_h * self.first + self.head_h + sum(
+            r[0] for r in self.rows) + PX * (len(self.rows) - 1)
+        self.min_h = self.h - sum(r[0] + PX for r in self.rows[1:])
+
+    def split(self, room: float):
+        """The rows that fit in room and the rest, as two cards; None if not one row fits."""
+        used, k = self.h - sum(r[0] + PX for r in self.rows) + PX, 0
+        while k < len(self.rows) and used + self.rows[k][0] + PX * bool(k) <= room:
+            used, k = used + self.rows[k][0] + PX * bool(k), k + 1
+        if k == len(self.rows) - 1 and k > 1 and self.rows[-1][1]:
+            k -= 1
+        if not k or k == len(self.rows):
+            return None
+        return self._part(self.rows[:k], self.first), self._part(self.rows[k:], False)
+
+    def _part(self, rows: list, first: bool):
+        part = object.__new__(Card)
+        part.__dict__.update(self.__dict__, rows=rows, first=first)
+        part._size()
+        return part
+
+    def draw(self, pdf: Pdf, x: float, y: float) -> None:
+        pdf.rect(x + PX / 2, y + PX / 2, WIDTH - PX, self.h - PX, WHITE, RULE, r=9 - PX / 2)
+        x, y, right = x + PX + self.pad[1], y + PX + self.pad[0], x + WIDTH - PX - self.pad[1]
+        if self.first:
+            if self.title:
+                pdf.text(x, y + 8.25, self.title, 8.25, INK, True)
+                pdf.text(right, y + 8.25, self.aside, 8.25, MUTED, align="r")
+            if self.name:
+                if self.pill:
+                    w = text_width(self.pill, 8.25, True) + 15
+                    pdf.rect(right - w, y + 1.5, w, 15, MINT, r=7.5)
+                    pdf.text(right - 7.5, y + 12, self.pill, 8.25, GREEN_INK, True, "r")
+                if self.lines:
+                    _draw(pdf, self.lines[0], x, y + 1.5, self.inner, 10.5, (12.75, 10.5))
+                    _draw(pdf, self.lines[1], x, y + 1.5 + 12.75 * len(self.lines[0]), self.inner, 7.5, (9, 7.5))
+                else:
+                    pdf.text(x + pdf.text(x, y + 12, self.name, 10.5, INK, True) + 6, y + 12, self.meta, 7.5, MUTED)
+            y += self.top_h - (16.75 if self.legend else 0)
+            if self.legend:
+                self.legend.draw(pdf, x, y)
+                y += 16.75
+        n = max(len(lines) for lines in self.head)
+        for (cx, w, align), lines in zip(self.cols, self.head):
+            _draw(pdf, lines, x + cx + 4.5, y + 3.75 + 8.25 * (n - len(lines)), w - 9, 7.125, (8.25, 6.75), align)
+        y += self.head_h
+        pdf.line(x, y - PX / 2, right, y - PX / 2, RULE)
+        for i, (h, total, size, laid) in enumerate(self.rows):
+            for (c, main, sub, ch), (cx, w, align) in zip(laid, self.cols):
+                top = y + 6 + int((h - 12 - ch) / 2 / PX) * PX
+                _draw(pdf, main, x + cx + 4.5, top, w - 9, size, _metrics(size), align)
+                top += len(main) * _metrics(size)[0]
+                _draw(pdf, sub, x + cx + 4.5, top, w - 9, 7.125, (8.25, 6.75), align)
+                if c.art:
+                    c.art(pdf, x + cx + 4.5, top + 8.25 * len(sub), w - 9)
+            y += h + PX
+            if i + 1 < len(self.rows):
+                pdf.line(x, y - PX / 2, right, y - PX / 2, RULE if self.rows[i + 1][1] else RULE2)
+
+
+class NextSteps:
+    """The navy Next steps card: a title over spans; a link is (text, True, WHITE, url)."""
+
+    def __init__(self, title: str, spans: list):
+        self.title, self.lines = title, wrap(spans, 8.25, WIDTH - 27, color=HAZE)
+        self.h = 36 + 15.75 * len(self.lines)
+
+    def draw(self, pdf: Pdf, x: float, y: float) -> None:
+        pdf.rect(x, y, WIDTH, self.h, DEEP, r=10.5)
+        pdf.text(x + 13.5, y + 21, self.title, 10.5, WHITE, True)
+        _draw(pdf, self.lines, x + 13.5, y + 25.5, WIDTH - 27, 8.25, (15.75, 11.75))
+
+
+_BANNER = 25.5 * MM + 57.75  # page 1's navy banner: padding, logo, title and subtitle lines
+
+
+class Report:
+    """The flowing A4 document. Page 1 opens with the navy banner, later pages with the slim bar, and every page ends
+    with the footer. add() blocks in order: gap is the space above a block, dropped at the top of a page, and keep
+    holds a block on the page where the next one starts. A block has h and draw(pdf, x, y); a Card also splits."""
+
+    def __init__(self, title: str, sub: str, date: str, footer: str):
+        self.title, self.sub, self.date, self.footer, self.blocks = title, sub, date, footer, []
+
+    def add(self, block, gap: float = 0.0, keep: bool = False) -> None:
+        self.blocks.append((block, gap, keep))
+
+    def _pages(self) -> list:
+        top, bottom = 24 * MM, PAGE_H - 16 * MM
+        items, pages, y, i = list(self.blocks), [[]], _BANNER + GAP, 0
+
+        def splits(b, room: float) -> bool:
+            """A card splits when it is taller than a page, or when a third of a page or more is left for it."""
+            return isinstance(b, Card) and (b.h > bottom - top or room >= (bottom - top) / 3)
+
+        def need(j: int, at: float) -> float:
+            b, gap, keep = items[j]
+            h = b.min_h if splits(b, bottom - at - gap) else b.h
+            return gap + h + (need(j + 1, at + gap + h) if keep and j + 1 < len(items) else 0)
+
+        while i < len(items):
+            b, gap, keep = items[i]
+            fresh = not pages[-1]
+            g = 0 if fresh else gap
+            if y + g + b.h + (need(i + 1, y + g + b.h) if keep and i + 1 < len(items) else 0) <= bottom or fresh and (
+                    not isinstance(b, Card) or b.h <= bottom - top):
+                pages[-1].append((b, y + g))
+                y, i = y + g + b.h, i + 1
+                continue
+            part = b.split(bottom - y - g) if splits(b, bottom - y - g) else None
+            if part:
+                pages[-1].append((part[0], y + g))
+                items[i] = (part[1], 0, keep)
+            elif fresh:
+                pages[-1].append((b, y))
+                i += 1
+            pages.append([])
+            y = top
+        return pages
+
+    def pdf(self) -> bytes:
+        pages, pdf = self._pages(), Pdf()
+        for n, blocks in enumerate(pages, 1):
+            pdf.page()
+            if n == 1:
+                pdf.rect(0, 0, PAGE_W, _BANNER, NAVY)
+                pdf.logo(SIDE, 10 * MM, 96)
+                pdf.text(SIDE, 88.11, self.title, 19.5, BONE, True, spacing=-0.39)
+                pdf.text(SIDE, 105.11, self.sub, 8.25, LILAC)
+            else:
+                pdf.rect(0, 0, PAGE_W, 16 * MM, NAVY)
+                pdf.logo(SIDE, 8 * MM - 9, 72)
+                x = PAGE_W - SIDE - text_width(self.title + "\xb7" + self.date, 7.125, False, 0.1425) - 9
+                for t in (self.title, "\xb7", self.date):
+                    x += pdf.text(x, 25.5, t, 7.125, LILAC, spacing=0.1425) + 4.5
+            for block, y in blocks:
+                block.draw(pdf, SIDE, y)
+            pdf.text(SIDE, PAGE_H - 14.7, self.footer, 6.375, MUTED)
+            pdf.text(PAGE_W - SIDE, PAGE_H - 14.7, "%d / %d" % (n, len(pages)), 6.375, MUTED, align="r")
+        return pdf.save("Zoorik " + self.title)
+
+
+# ---------------------------------------------------------------- end of pdf writer
 
 
 # ---------------------------------------------------------------- main
@@ -2339,11 +2470,12 @@ def fetch_prices(func: Callable, regions: List[str], label: str) -> Dict[str, Op
     return {r: p if isinstance(p, Prices) else None for r, p in zip(regions, fetched)}
 
 
-def collect_facts(vms: List[Vm], disks: List[Disk]) -> Dict[str, Optional[Prices]]:
-    """Azure's VM size limits per subscription and region, and list prices per region, read in parallel. AWS's
-    instance limits come with its inventory."""
+def collect_facts(vms: List[Vm]) -> Dict[str, Optional[Prices]]:
+    """Azure's VM size limits per subscription and region, and the list prices of the VMs' data disks per region,
+    read in parallel. AWS's instance limits come with its inventory."""
     azure_vms = [v for v in vms if v.cloud == "azure"]
     keys = sorted({(v.subscription, v.region) for v in azure_vms if re.fullmatch(r"[a-z0-9]+", v.region)})
+    disks = list({dd.disk.id: dd.disk for v in vms for dd in v.data if dd.disk}.values())
     regions = sorted({k[1] for k in keys} | {d.region for d in disks
                                              if d.cloud == "azure" and re.fullmatch(r"[a-z0-9]+", d.region)})
     facts = dict(zip(keys, parallel(region_facts, keys, "Reading VM size limits, subscription-regions")))
@@ -2372,10 +2504,10 @@ def disk_activity(disk: Disk) -> Hourly:
 
 def unused_path(folder: str, stem: str) -> str:
     """A report path in the folder that no earlier report holds, so nothing is overwritten."""
-    path, n = os.path.join(folder, stem + ".xlsx"), 1
+    path, n = os.path.join(folder, stem + ".pdf"), 1
     while os.path.exists(path):
         n += 1
-        path = os.path.join(folder, f"{stem}-{n}.xlsx")
+        path = os.path.join(folder, f"{stem}-{n}.pdf")
     return path
 
 
@@ -2400,7 +2532,15 @@ def sign_in(shell: str) -> Tuple[List[Scan], List[Tuple[str, Failed]]]:
     return scans, problems
 
 
-def read_scopes(scan: Scan) -> Tuple[List[Vm], List[Disk]]:
+def grouped(scopes: List[Subscription]) -> Dict[str, List[str]]:
+    """Scopes by the reason they were not scanned: one line for every region an account policy refuses."""
+    out: Dict[str, List[str]] = {}
+    for s in scopes:
+        out.setdefault(s.note, []).append(s.name)
+    return out
+
+
+def read_scopes(scan: Scan) -> List[Vm]:
     """Read one cloud's inventory and say what each subscription or region held."""
     if scan.cloud == "azure":
         say(f"Directory: {scan.label}")
@@ -2427,7 +2567,6 @@ def assessment() -> int:
     say(f"Zoorik Amoeba: disk assessment {VERSION}")
     for started in RUN_COMMAND_STARTED.values():
         started.clear()
-    RUN_COMMAND_SENT.clear()
     shell = cloud_shell()
     scans, problems = sign_in(shell)
     signed_out = [(name, e) for name, e in problems if "is not installed" not in str(e)]
@@ -2441,22 +2580,20 @@ def assessment() -> int:
     for name, e in signed_out:
         say(f"{name}: not assessed, {e}")
     vms: List[Vm] = []
-    disks: List[Disk] = []
     for scan in scans:
-        found = read_scopes(scan)
-        vms += found[0]
-        disks += found[1]
-    if not vms and not disks:
+        vms += read_scopes(scan)
+    listed = [v for v in vms if v.data]
+    if not listed:
         if all(s.note for scan in scans for s in scan.scopes):
             say("Nothing could be read, so there is nothing to report. Fix the reason above, then run this again.")
             return 1
-        say("No VMs or disks in what was scanned, so there is nothing to report.")
+        say("No VM with data disks in what was scanned, so there is nothing to report.")
         return 0
-    prices = collect_facts(vms, disks)
+    prices = collect_facts(listed)
 
     candidates = []
-    for v in vms:
-        if not v.data or not v.linux or screen(v):
+    for v in listed:
+        if not v.linux or screen(v):
             continue
         if not v.running:
             v.guest_note = "VM is not running"
@@ -2474,7 +2611,6 @@ def assessment() -> int:
         answer = ask(prompt_text(scan.cloud, group, names))
         if answer is None:
             say(f"\nNo terminal to ask on, so disk usage inside {CLOUD_NAMES[scan.cloud]} VMs is not read.")
-        scan.guest_answer = {True: "", False: "declined at the prompt", None: "no terminal to ask on"}[answer]
         if answer:
             read = read_guest if scan.cloud == "azure" else read_instance
             for v, result in zip(group, parallel(read, group, "Reading disk usage, VMs")):
@@ -2484,64 +2620,41 @@ def assessment() -> int:
                     v.guest_note = str(result)
         else:
             for v in group:
-                v.guest_note = scan.guest_answer
+                v.guest_note = "declined at the prompt" if answer is False else "no terminal to ask on"
 
-    measured = []
-    for v in vms:
-        for dd in v.data:
-            if dd.disk and not v.linux:
-                dd.disk.metric_note = "not measured (Windows VM)"
-            elif dd.disk and v.nvme is False:
-                dd.disk.metric_note = "not measured (Xen instance type)"
-            elif dd.disk:
-                measured.append(dd.disk)
+    measured = list({dd.disk.id: dd.disk for v in listed if v.guest
+                     for dd in under(v, poolable(v)) if dd.disk}.values())
     for d, result in zip(measured, parallel(disk_activity, measured, f"Reading {METRIC_DAYS} days of disk metrics")):
         if isinstance(result, dict) and result:
             d.hourly = result
         else:
             d.metric_note = f"metrics not readable: {result}" if isinstance(result, Failed) else \
                 f"no metric data in the last {METRIC_DAYS} days"
-    for v in vms:
+    for v in listed:
         try:
             assess(v, prices)
         except Exception as e:  # one VM with unexpected data must not stop the report
-            v.lane, v.reasons = "", [f"not assessed: unexpected data ({type(e).__name__})"]
+            v.reasons = [f"not assessed: unexpected data ({type(e).__name__})"]
 
     now = datetime.now(timezone.utc)
-    run = {"scans": scans, "now": now, "when": now.strftime("%Y-%m-%d %H:%M UTC")}
-    sheets = build_sheets(run, vms, disks)
-    stem = f"zoorik-disk-assessment-{now:%Y%m%d-%H%M}"
+    data, saving = report(scans, listed, now)
+    stem = f"zoorik-amoeba-assessment-{now:%Y%m%d-%H%M}"
     path = ""
     for folder in (os.getcwd(), os.path.expanduser("~")):
         try:
             path = unused_path(folder, stem)
-            write_xlsx(path, sheets)
+            with open(path, "wb") as f:
+                f.write(data)
             break
         except OSError:
             path = ""
     if not path:
-        say(f"Could not write {stem}.xlsx here or in your home folder.")
+        say(f"Could not write {stem}.pdf here or in your home folder.")
         return 1
 
-    with_data = [v for v in vms if v.data]
-    attached = attached_once(with_data)
-    spend = priced(attached)
-    unpriced = len(attached) - len(spend)
-    savings = [v.saving for v in with_data if v.saving]
-    loose = [d for d in disks if d.state.lower() == "unattached"]
-    loose_spend = [d.price for d in loose if d.price is not None]
-    total_spend = r2(sum(spend)) if spend else None
     say()
-    say(f"VMs:               {len(vms)} scanned, {len(with_data)} with data disks")
-    say(f"Data-disk spend:   {money(total_spend)}" + (" per month at list prices" if spend else "")
-        + (f" ({unpriced} data disk(s) not priced)" if unpriced else ""))
-    if savings:
-        share = f" ({sum(savings) / total_spend:.0%} of data-disk spend)" if total_spend else ""
-        say(f"Estimated saving:  {money(r2(sum(savings)))} per month on {len(savings)} VM(s){share}")
-    else:
-        say(f"Estimated saving:  {no_saving_text(vms)}")
-    say(f"Unattached disks:  {len(loose)}" + (f", {money(r2(sum(loose_spend)))} per month" if loose_spend else "")
-        + (f" ({len(loose) - len(loose_spend)} not priced)" if len(loose) > len(loose_spend) else ""))
+    say(f"VMs:               {len(vms)} scanned, {len(listed)} with data disks")
+    say(f"Estimated saving:  {saving}")
     say()
     say(f"Report: {path}")
     if shell == "azure":

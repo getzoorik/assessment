@@ -1,6 +1,6 @@
 # Zoorik assessments
 
-Zoorik's free cloud cost assessment for Coral (Kubernetes) and Amoeba (block storage). One command estimates how much you can reduce your cloud bill. It sends nothing anywhere: it writes one Excel file for you to email to founders@zoorik.com.
+Zoorik's free cloud cost assessment for Coral (Kubernetes) and Amoeba (block storage). One command estimates how much you can reduce your cloud bill. It sends nothing anywhere: it writes one PDF report for you to email to founders@zoorik.com.
 
 ```bash
 npx zoorik assess coral     # Kubernetes: AKS, EKS, or any cluster kubectl can reach
@@ -46,12 +46,12 @@ Both Cloud Shells close a session after about 20 minutes without a key press, ev
 
 ### What it reads
 
-- **In each cluster, with `kubectl get`:** nodes, pods, ReplicaSets, Jobs, HPAs, PDBs and PersistentVolumeClaims.
-- **With `kubectl top`:** node and container usage, every 30 seconds. It keeps the peak.
+- **In each cluster, with `kubectl get`:** nodes, pods, ReplicaSets and Jobs.
+- **With `kubectl top`:** container usage, every 30 seconds. It keeps the peak.
 - **What it keeps:**
-  - names, owners, requests, limits and volume claim names;
-  - labels, used only for matching;
-  - each node's machine type, zone, size, and whether it is Spot or on-demand.
+  - names, owners, requests and limits;
+  - one pod label, `pod-template-hash`, used only to match pods to their Deployment;
+  - each node's machine type, node pool, region, operating system and allocatable CPU, memory and pods, and whether it is Spot or on-demand.
 
   It never reads Secrets or ConfigMaps. It never keeps env values, annotations or pod IPs.
 - **With `az` or `aws`:** the signed-in account, its clusters, node pools and regions. It also writes each cluster's credentials to a temporary kubeconfig.
@@ -80,7 +80,7 @@ Apart from this pod, the script only reads, and it writes only the files below.
 
 ### What it sends
 
-Nothing. There is no upload and no telemetry, and you send the file yourself. It switches off the Azure CLI's own usage telemetry for its calls, without changing your az settings. Its only calls go to:
+Nothing. There is no upload and no telemetry, and you send the report yourself. It switches off the Azure CLI's own usage telemetry for its calls, without changing your az settings. Its only calls go to:
 
 - your clusters;
 - your cloud's own APIs;
@@ -88,9 +88,10 @@ Nothing. There is no upload and no telemetry, and you send the file yourself. It
 
 ### What it writes
 
-- **One Excel file,** `zoorik-k8s-assessment-YYYYMMDD-HHMM.xlsx`.
+- **One PDF report,** `zoorik-coral-assessment-YYYYMMDD-HHMM.pdf` (UTC).
   - In a Cloud Shell it goes in your home folder. Elsewhere it goes in the current directory, or in your home folder if the current directory can't be written. `--out` chooses another place.
-  - Its sheets are Summary, Node pools, Nodes, Workloads and Assumptions.
+  - It shows what you can save across your clusters, then by cluster and node pool, the recommended sizes for your workloads, and any cluster it could not assess, with the reason.
+  - It names your clusters, their regions and node pools, and your namespaces and workloads. `--anonymize` replaces namespace and workload names, and `--anonymize-clusters` cluster names too.
 - **Working files:** kubectl's cache and the temporary kubeconfig, and on Windows any `az` argument that `cmd.exe` would change (`az` is a batch file there). They go in a temporary folder that is deleted when the script exits. Your own kubeconfig is left as it is.
 
 ### Access it needs
@@ -115,11 +116,11 @@ The identity that created the cluster usually has an access entry already. For a
 **Inside each cluster:** the identity needs `get` and `list`, cluster-wide, on the resources the script reads. If it doesn't have them, a cluster admin can create this role and bind it. Replace `GROUP` with the Kubernetes group from the EKS access entry, or with the Entra ID group's object ID on AKS:
 
 ```bash
-kubectl create clusterrole zoorik-assess-read --verb=get,list --resource=nodes,pods,persistentvolumeclaims,replicasets.apps,jobs.batch,horizontalpodautoscalers.autoscaling,poddisruptionbudgets.policy,nodes.metrics.k8s.io,pods.metrics.k8s.io
+kubectl create clusterrole zoorik-assess-read --verb=get,list --resource=nodes,pods,replicasets.apps,jobs.batch,pods.metrics.k8s.io
 kubectl create clusterrolebinding zoorik-assess-read --clusterrole=zoorik-assess-read --group=GROUP
 ```
 
-When the script can't read a cluster, the run goes on to the next one, and the Status column says why.
+When the script can't read a cluster, the run goes on to the next one, and the report lists it under Not in the saving yet, with the reason.
 
 ### Options
 
@@ -132,7 +133,7 @@ curl -fsSL https://zoorik.com/assess/k8s | python3 - --anonymize
 
 | Option | Effect |
 |---|---|
-| `--anonymize` | Replace namespace, workload and node names with short hashes, salted for this run. Node pool names stay. |
+| `--anonymize` | Replace namespace and workload names with short hashes, salted for this run. Node pool names stay. |
 | `--anonymize-clusters` | Also replace cluster names. |
 | `--sample-minutes N` | Sample usage for N minutes (default 3; 0 takes one sample). |
 | `--subscription ID` | Search this Azure subscription instead of the current one. |
@@ -141,19 +142,19 @@ curl -fsSL https://zoorik.com/assess/k8s | python3 - --anonymize
 | `--context NAME` | Assess this kube context; repeat it for more. |
 | `--all-contexts` | Assess every context in your kubeconfig. A cluster reached through several contexts is counted once. |
 | `--no-invoke` | Never use `az aks command invoke`. |
-| `--no-prices` | Skip the price lookups, so there are no cost or savings figures. |
-| `--out PATH` | Write the Excel file to this file or folder. A path ending in `/` is a folder, created if needed; a file name gets `.xlsx` added if it lacks it. |
+| `--no-prices` | Skip the price lookups. The report then counts machines, with no cost or savings in dollars. |
+| `--out PATH` | Write the report to this file or folder. A path ending in `/` is a folder, created if needed; a file name gets `.pdf` added if it lacks it. |
 
 `--subscription`, `--region`, `--discover`, `--context` and `--all-contexts` replace the automatic choice of clusters: only what you name is assessed. `--help` lists every option.
 
-### Download the file and send it
+### Download the report and send it
 
-When the script finishes, it prints the file's full path.
+When the script finishes, it prints the report's full path.
 
 - **Azure Cloud Shell:** on the toolbar, choose **Manage files > Download**, then enter that path.
 - **AWS CloudShell:** choose **Actions > Download file**, then enter that path. This works only from the full CloudShell page. If **Actions** is missing, open CloudShell in a new browser tab.
 
-Then e-mail the file to **founders@zoorik.com**.
+Then e-mail the report to **founders@zoorik.com**.
 
 ### How the estimate works
 
@@ -172,7 +173,7 @@ Exceptions:
 - the same for memory;
 - ceil(workload pods / ((allocatable pods per node − DaemonSet and static pods per node) × 0.85)).
 
-It is never more than today's count. Each pool keeps at least its autoscaler minimum, and at least 1 node, across its machine types. Where the cloud API gives no minimum for a pool (a cluster read through a kube context, or a node group the API doesn't list), the floor is 1 node and the Status column says so.
+It is never more than today's count. Each pool keeps at least its autoscaler minimum, and at least 1 node, across its machine types. Where the cloud API gives no minimum for a pool (a cluster read through a kube context, or a node group the API doesn't list), the floor is 1 node.
 
 **3. Price the difference.**
 
@@ -194,8 +195,8 @@ They leave out discounts, reservations, savings plans and credits. Nodes whose l
 - Pending pods.
 
 **Limits:**
-- **Private EKS:** a private EKS API can't be reached from CloudShell. Run the line from a machine inside the VPC instead, such as an EC2 instance. A CloudShell VPC environment won't do: it can't download files. Run from CloudShell, the report lists that cluster's node groups and their cost from the AWS API, but has no savings estimate for it.
-- **Large clusters through `command invoke`:** these are read one resource kind at a time. If one kind is still over 512 KB, the Status column names it.
+- **Private EKS:** a private EKS API can't be reached from CloudShell. Run the line from a machine inside the VPC instead, such as an EC2 instance. A CloudShell VPC environment won't do: it can't download files. Run from CloudShell, the report lists that cluster under Not in the saving yet, with the reason and, where its node groups have list prices, today's cost.
+- **Large clusters through `command invoke`:** these are read one resource kind at a time. If the nodes or pods are still over 512 KB, the report lists the cluster under Not in the saving yet, with the reason.
 
 ---
 
@@ -229,13 +230,13 @@ Both Cloud Shells close a session after about 20 minutes without a key press. On
   - each VM size's data-disk slots;
   - each VM size's uncached disk IOPS and throughput limits;
   - which zones offer Premium SSD v2 to your subscription.
-- **Azure Monitor:** 14 days of IOPS and throughput for each data disk of a Linux VM, as each hour's busiest minute. The metrics are Composite Disk Read/Write Operations/sec and Bytes/sec, with the Maximum aggregation.
+- **Azure Monitor:** 14 days of IOPS and throughput for the data disks the pool would replace, on each VM whose disk usage was read, as each hour's busiest minute. The metrics are Composite Disk Read/Write Operations/sec and Bytes/sec, with the Maximum aggregation.
 - **prices.azure.com:** the public list prices of managed disks.
 
 **AWS, in each enabled region:**
-- **EC2:** your instances and EBS volumes, and each instance type's EBS limits (volume slots, baseline IOPS and throughput, whether its volumes are NVMe devices).
+- **EC2:** your instances and EBS volumes, and the EBS limits of each instance type with data volumes (volume slots, baseline IOPS and throughput, whether its volumes are NVMe devices).
 - **Systems Manager:** which instances its agent manages, and their Linux distribution.
-- **CloudWatch:** 14 days of IOPS and throughput for each data volume of a Linux instance, as each hour's busiest minute. The metrics are VolumeReadOps, VolumeWriteOps, VolumeReadBytes and VolumeWriteBytes, with the Maximum statistic over AWS's 1-minute data points. These requests count toward CloudWatch's free tier of 1 million API requests a month.
+- **CloudWatch:** 14 days of IOPS and throughput for the data volumes the pool would replace, on each instance whose disk usage was read, as each hour's busiest minute. The metrics are VolumeReadOps, VolumeWriteOps, VolumeReadBytes and VolumeWriteBytes, with the Maximum statistic over AWS's 1-minute data points. These requests count toward CloudWatch's free tier of 1 million API requests a month.
 - **The AWS Price List API:** EBS list prices, through `aws pricing get-products`.
 
 ### Beyond reads: one command inside each VM, only if you answer y
@@ -265,7 +266,7 @@ Read disk usage inside these N instance(s) with Systems Manager Run Command? [y/
 - its agent keeps a copy under `/var/lib/amazon/ssm` on the instance;
 - CloudTrail records each call.
 
-**If you answer anything else, or there is no terminal to ask on:** nothing runs inside any VM. Those VMs show as Not checked, with no saving.
+**If you answer anything else, or there is no terminal to ask on:** nothing runs inside any VM. The report lists those VMs under Not in the saving yet, with the reason.
 
 **Ctrl-C** stops the script at once, and no new command starts after it. Commands already started finish in the cloud, and the script's last line says how many VMs they reached.
 
@@ -274,10 +275,10 @@ This is the command. The two clouds differ only in the fifth line, which finds t
 ```sh
 echo S
 echo "K $(uname -r)"
-grep -E '^(ID|ID_LIKE|VERSION_ID)=' /etc/os-release
+grep -E '^(ID|ID_LIKE)=' /etc/os-release
 if grep -qw btrfs /proc/filesystems; then echo "B loaded"; elif modinfo -n btrfs >/dev/null 2>&1; then echo "B module"; else echo "B absent"; fi
 for l in /dev/disk/azure/scsi1/lun*; do n=${l##*/lun}; case $n in ''|*[!0-9]*) continue;; esac; echo "L $n $(lsblk -nro MOUNTPOINT "$l" | tr '\n' ' ')"; done
-timeout 30 df -P -B1 -T -l | awk '$1 ~ /^\/dev\// && $1 !~ /^\/dev\/loop/ {m=$7; for (i=8; i<=NF; i++) m=m" "$i; print "D", $2, $3, $4, m}'
+timeout 30 df -P -B1 -l | awk '$1 ~ /^\/dev\// && $1 !~ /^\/dev\/loop/ {m=$6; for (i=7; i<=NF; i++) m=m" "$i; print "D", $3, m}'
 echo E
 ```
 
@@ -287,11 +288,11 @@ On AWS the fifth line is:
 for l in /dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_vol*; do case $l in *-part*) continue;; esac; [ -e "$l" ] || continue; v=${l##*_vol}; echo "V vol-${v%%[-_]*} $(lsblk -nro MOUNTPOINT "$l" | tr '\n' ' ')"; done
 ```
 
-Apart from this step, the script only reads, and it writes only the file below.
+Apart from this step, the script only reads, and it writes only the report below.
 
 ### What it sends
 
-Nothing. There is no upload and no telemetry, and you send the file yourself. It switches off the Azure CLI's own usage telemetry for its calls, without changing your az settings. Its only calls go to:
+Nothing. There is no upload and no telemetry, and you send the report yourself. It switches off the Azure CLI's own usage telemetry for its calls, without changing your az settings. Its only calls go to:
 
 - your Azure and AWS APIs;
 - the public Azure price list, which receives a region name for each lookup;
@@ -299,12 +300,13 @@ Nothing. There is no upload and no telemetry, and you send the file yourself. It
 
 ### What it writes
 
-One Excel file, `zoorik-disk-assessment-YYYYMMDD-HHMM.xlsx` (UTC).
+One PDF report, `zoorik-amoeba-assessment-YYYYMMDD-HHMM.pdf` (UTC).
 
 - It goes in the current directory, or in your home folder if the current directory can't be written.
 - It never overwrites an earlier report: a second run in the same minute adds `-2`, `-3` and so on.
-- Its sheets are Summary, VMs, Disks, Unattached disks and About.
-- It names your directory, subscriptions, resource groups, AWS account, regions, VMs, disks and mount points.
+- It shows what you can save across your accounts, then by account and VM, and each VM with data disks that is not in the saving yet, with the reason.
+- It names your subscriptions, AWS account ids, regions and VMs, and in some reasons a mount point.
+- When no VM has data disks, it writes no report.
 
 On Windows, `az` is a batch file, and Windows' `cmd.exe` would change some of its arguments (the Resource Graph query, URLs, the command above). Those arguments go through a temporary file that `az` reads, and the script deletes it right after the call, or as it stops if you press Ctrl-C.
 
@@ -325,25 +327,25 @@ On Windows, `az` is a batch file, and Windows' `cmd.exe` would change some of it
 
 None.
 
-### Download the file and send it
+### Download the report and send it
 
-When the script finishes, it prints the file's full path.
+When the script finishes, it prints the report's full path.
 
 - **Azure Cloud Shell:** on the toolbar, choose **Manage files > Download**, then enter that path.
 - **AWS CloudShell:** choose **Actions > Download file**, then enter that path. This works only from the full CloudShell page. If **Actions** is missing, open CloudShell in a new browser tab.
 
-Then e-mail the file to **founders@zoorik.com**.
+Then e-mail the report to **founders@zoorik.com**.
 
 ### How the estimate works
 
 The script estimates a saving for each Linux VM whose disk usage was read.
 
-1. **Used space** is the space used on the data-disk mounts the pool takes. A shared disk (an Azure disk attached to several VMs, or an AWS Multi-Attach volume) is never pooled; it stays as it is, and the totals count it once.
+1. **Used space** is the space used on the data-disk mounts the pool takes. A shared disk (an Azure disk attached to several VMs, or an AWS Multi-Attach volume) is never pooled; it stays as it is.
 2. **Pool size:**
    - **Azure:** used + 20% of used (at least 50 GB), rounded up. Each mount is first rounded up to a whole GB.
    - **AWS,** as Amoeba sizes a new pool: used × 1.03 (btrfs's own space), held at most 90% full and with at least 10 GB free, rounded up to whole GB. One reading has no growth or burst to add.
 3. **Disk type:**
-   - **Azure:** the pool goes on Premium SSD v2 where the VM's region and zone offer it, as Azure lists it for your subscription. A VM without a zone also needs a region where Microsoft supports nonzonal Premium SSD v2. Otherwise the pool goes on Premium SSD. Pool disks are locally redundant (LRS). Where today's disks are zone-redundant (ZRS), the VM's Reason says that part of the saving is that difference.
+   - **Azure:** the pool goes on Premium SSD v2 where the VM's region and zone offer it, as Azure lists it for your subscription. A VM without a zone also needs a region where Microsoft supports nonzonal Premium SSD v2. Otherwise the pool goes on Premium SSD. Pool disks are locally redundant (LRS).
    - **AWS:** the pool goes on gp3, the volume type Amoeba creates.
 4. **Layout, as Amoeba plans it:**
    - **Azure:**
@@ -361,9 +363,10 @@ The script estimates a saving for each Linux VM whose disk usage was read.
    - Each Premium SSD v2 disk and each gp3 volume includes 3,000 IOPS and 125 MB/s.
    - **Azure:** more is priced in only when the measured peak × 1.3, shared across the pool's disks, needs it. Even then it is never more than the VM itself can drive. A Premium SSD pool has the fixed IOPS and MB/s of its disk sizes, without bursting. If those together can't carry the measured peak × 1.3 (or what the VM can drive, if less), the next rule applies.
    - **AWS,** as Amoeba sets its volumes: each gp3 volume gets the measured peak × 1.3 shared across the pool's volumes, and at least the write peak × 1.3. It stays within what a gp3 volume of its size takes (500 IOPS per GB, up to 80,000; 0.25 MB/s per IOPS, up to 2,000) and within its share of what the instance can drive. Amoeba itself plans from its own readings inside the instance; the estimate uses CloudWatch's instead. If the volumes can't carry that, the next rule applies.
-   - **Where the pool can't carry the load,** the mount with the highest peak IOPS (then MB/s) stays on its disks, as Amoeba leaves it, and the pool is sized again for the other mounts. The VM's Reason names that mount, and its disks count on neither side of the saving. If no mount is left, the VM is not estimated.
+   - **Where the pool can't carry the load,** the mount with the highest peak IOPS (then MB/s) stays on its disks, as Amoeba leaves it, and the pool is sized again for the other mounts. Its disks count on neither side of the saving. If no mount is left, the VM is not estimated.
    - Without metrics for the disks the pool replaces, the VM is not estimated.
-6. **Saving per month** = today's list price of the disks the pool replaces − the pool's list price. Where the pool costs no less, the VM shows No saving.
+6. **Saving per month** = today's list price of the disks the pool replaces − the pool's list price. Where the pool costs no less, the VM is not in the saving.
+   - The report's disk bill covers every data disk of the VMs in the saving. A disk that stays as it is costs the same today and after; a shared disk belongs to more than one VM and is left out.
 
 **Prices:**
 - **Azure:** the public Azure Retail Prices API, using pay-as-you-go USD list prices for each disk's region, read at run time.
@@ -381,18 +384,21 @@ The script estimates a saving for each Linux VM whose disk usage was read.
 - OS disks and root volumes; instance store;
 - unmanaged (VHD) disks;
 - scale-set (uniform) instances;
+- unattached disks;
 - subscriptions in other directories, and AWS regions not enabled for the account.
 
-Data disks without a mounted file system stay as they are. Unattached disks are listed with their cost on their own sheet, outside the Amoeba saving.
+Data disks without a mounted file system stay as they are.
 
-**Lanes** (the Lane column on the VMs sheet):
+**Not in the saving yet.** A VM with data disks is in the saving when its disk usage was read and the pool costs less than the disks it replaces. The report lists every other one under Not in the saving yet, with the reason, such as:
+- Windows; RHEL-family Linux, which includes Amazon Linux; no btrfs in the kernel; or no mounted data disk other than shared disks;
+- on Azure, a VM in a resource group another Azure service manages, such as Azure Databricks or an AKS node resource group, or a VM size with fewer than 8 data-disk slots;
+- on AWS, a Xen instance type, because Amoeba needs a Nitro type, where each EBS volume is an NVMe device named by its volume id;
+- disk usage not read, for example because you answered no, the VM is not running, or Systems Manager doesn't manage the instance;
+- not enough free data-disk slots to build the pool beside today's disks;
+- no metrics, or no list price, for the disks the pool replaces;
+- a pool that would cost no less.
 
-| Lane | Meaning |
-|---|---|
-| Ready | Amoeba can take the VM as it is. |
-| Needs work | The VM needs a fix first: a kernel below 5.14, Azure Disk Encryption, or not enough free data-disk slots. |
-| Not supported | Windows; RHEL-family Linux, which includes Amazon Linux; no btrfs in the kernel; or no mounted data disk other than shared disks. On Azure also a VM in a resource group another Azure service manages, such as Azure Databricks or an AKS node resource group, or a VM size with fewer than 8 data-disk slots. On AWS also a Xen instance type, because Amoeba needs a Nitro type, where each EBS volume is an NVMe device named by its volume id. |
-| Not checked | Disk usage was not read, for example because you answered no, the VM is not running, or Systems Manager doesn't manage the instance. |
+A VM that needs a fix first, such as a kernel below 5.14 or Azure Disk Encryption, stays in the saving.
 
 **Units:** GB means GiB (2^30 bytes), the unit both clouds size disks in. On Azure, MB/s means 10^6 bytes per second. On AWS, MB/s means MiB/s (2^20 bytes per second), the unit gp3 throughput is set in.
 
@@ -400,12 +406,12 @@ Data disks without a mounted file system stay as they are. Unattached disks are 
 
 ## Where the figures come from
 
-Every figure in either file is one of these:
+Every figure in either report is one of these:
 - read from your cloud or your clusters;
 - read from the public price lists;
 - computed from those by the method above.
 
-When a figure can't be known, its cell is blank and the row says why. In the k8s.py report, see the Status and Price note columns; a blank limit there means at least one container has no limit. In the disks.py report, see the Reason and Note columns. Nothing is guessed or filled in.
+When a figure can't be known, the report gives the reason instead of a number: a node pool with no list price shows Not priced and why, and a cluster or VM with no estimate is listed under Not in the saving yet, with the reason. Nothing is guessed or filled in.
 
 The figures are estimates at list prices, not a quote.
 
