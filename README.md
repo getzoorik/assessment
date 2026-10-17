@@ -1,23 +1,20 @@
 # Zoorik assessments
 
-Zoorik's free assessments for Coral (Kubernetes) and Amoeba (Azure block storage). You paste one line. The script writes one Excel file that estimates what you could save, and you e-mail that file to founders@zoorik.com.
+Zoorik's free cloud cost assessment for Coral (Kubernetes) and Amoeba (block storage). One command estimates how much you can reduce your cloud bill. It sends nothing anywhere: it writes one Excel file for you to email to founders@zoorik.com.
 
-- [Kubernetes: `k8s.py`](#kubernetes-k8spy) covers AKS, EKS, or any cluster kubectl can reach.
-- [Azure disks: `disks.py`](#azure-disks-diskspy) covers the data disks of your Azure Linux VMs.
+```bash
+npx zoorik assess coral     # Kubernetes: AKS, EKS, or any cluster kubectl can reach
+npx zoorik assess amoeba    # block storage: the data disks of your VMs
+```
+
+No Node.js? `pip install zoorik`, then `zoorik assess coral`. Either way it needs Python 3.8 or later, and Azure Cloud Shell and AWS CloudShell already have everything it calls.
+
+- [Kubernetes: `k8s.py`](#kubernetes-k8spy)
+- [Azure disks: `disks.py`](#azure-disks-diskspy)
 - [Where the figures come from](#where-the-figures-come-from)
 - [Contributing](#contributing)
 
-Each script is one Python file. It needs Python 3.8 or later and uses only the standard library. Azure Cloud Shell and AWS CloudShell already have Python 3 and the CLIs the scripts call. Each `zoorik.com/assess/...` URL redirects to the file of the same name in this repo, so the code you read here is the code that runs.
-
-The same two files are also on PyPI, as the `zoorik` package, for a command you install once:
-
-```bash
-pip install zoorik
-zoorik assess coral    # runs k8s.py, with the same options
-zoorik assess amoeba   # runs disks.py
-```
-
-With Node.js, `npx zoorik assess coral` does the same: it runs the PyPI package in a private Python environment. Each PyPI release is built from a release tag of this repo by its [release workflow](https://github.com/getzoorik/assessment/blob/main/.github/workflows/release.yaml).
+Each assessment is one Python file in this repo, using only the standard library. The npm and PyPI packages run these same files, and every release of both is built from a release tag of this repo by its [release workflow](https://github.com/getzoorik/assessment/blob/main/.github/workflows/release.yaml). The `zoorik.com/assess/...` one-liners below redirect to the files here, so the code you read is the code that runs.
 
 ---
 
