@@ -1,6 +1,6 @@
 # zoorik
 
-Zoorik's free cloud cost assessment. It estimates how much you can reduce your cloud bill, reads only, and sends nothing.
+Zoorik's free cloud cost assessment. It estimates how much you can reduce your cloud bill and sends nothing anywhere.
 
 ```bash
 npx zoorik assess coral     # Kubernetes: AKS and EKS

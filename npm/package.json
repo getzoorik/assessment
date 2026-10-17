@@ -1,6 +1,6 @@
 {
   "name": "zoorik",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Zoorik's free cloud cost assessment: npx zoorik assess coral",
   "keywords": ["kubernetes", "aks", "eks", "azure", "aws", "cloud cost", "assessment"],
   "homepage": "https://zoorik.com/assessment",
