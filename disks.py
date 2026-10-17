@@ -1,44 +1,62 @@
 #!/usr/bin/env python3
 """Zoorik Amoeba: disk assessment.
 
-Reads the Azure VMs and managed disks you can see, estimates what Zoorik
-Amoeba (Zoorik block storage) could save by right-sizing the data disks of
+Reads the VMs and disks you can see in Azure and AWS, estimates what Zoorik
+Amoeba (Zoorik block storage) could save by rightsizing the data disks of
 your Linux VMs, and writes one Excel file for you to e-mail to Zoorik.
-Nothing to install.
 
-Run it in Azure Cloud Shell, or in any shell where az is signed in:
+Run it in Azure Cloud Shell or AWS CloudShell, or in any other terminal on
+Linux, macOS or Windows where az or aws is signed in. It assesses each cloud
+whose CLI is signed in:
+    npx zoorik assess amoeba
+    zoorik assess amoeba       (after pip install zoorik)
     curl -fsSL https://zoorik.com/assess/disks | python3 -
+The curl line is for bash or zsh: Linux, macOS and both Cloud Shells. On
+Windows, use one of the first two, in PowerShell or Command Prompt, where it
+can ask its question.
 
 The source is at github.com/getzoorik/assessment.
 
 What it does. Apart from the one step marked below, which runs only if you
 answer y, it only reads, and it sends nothing anywhere.
-  - Azure Resource Graph: your VMs, managed disks and resource groups, in
-    every enabled subscription of the directory you are signed in to.
+  Azure, in every enabled subscription of the directory you are signed in to:
+  - Azure Resource Graph: your VMs, managed disks and resource groups.
   - Azure Compute: each VM size's data-disk slots and disk limits, and where
     Premium SSD v2 is offered.
   - Azure Monitor: 14 days of IOPS and throughput for each data disk of a
     Linux VM.
   - prices.azure.com: the public list prices of managed disks.
-  - Only if you answer y to its one question: one command that only reads,
-    inside each running Linux VM with data disks, through Azure Run Command.
-    It reads used space (df, lsblk), the kernel version, the Linux
-    distribution and whether btrfs is available. On its side, Azure adds its
-    Run Command extension to a VM that does not have it yet, keeps a copy of
-    the command and its output under /var/lib/waagent on the VM, and records
-    each run in the activity log.
-It writes one file: the Excel report, in the current directory.
+  AWS, in every enabled region of the account you are signed in to:
+  - EC2: your instances, EBS volumes, and each instance type's EBS limits.
+  - Systems Manager: which instances its agent manages.
+  - CloudWatch: 14 days of IOPS and throughput for each data volume of a
+    Linux instance.
+  - the AWS Price List API: EBS list prices.
+  Only if you answer y to its question: one command that only reads, inside
+  each running Linux VM with data disks, through Azure Run Command or AWS
+  Systems Manager Run Command. It reads used space (df, lsblk), the kernel
+  version, the Linux distribution and whether btrfs is available. On its
+  side, Azure adds its Run Command extension to a VM that does not have it
+  yet, keeps a copy of the command and its output under /var/lib/waagent on
+  the VM, and records each run in the activity log. Systems Manager keeps the
+  command and its output in its Run Command history, its agent keeps a copy
+  under /var/lib/amazon/ssm on the instance, and CloudTrail records each call.
+It writes one file: the Excel report, in the current directory. On Windows,
+an az argument that cmd.exe would change goes through a temporary file that
+az reads and the script deletes at once.
 """
 
 import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 
 if sys.version_info < (3, 8):
-    print("This needs Python 3.8 or later. Open Azure Cloud Shell (shell.azure.com) and paste the line there.")
+    print("This needs Python 3.8 or later. Open Azure Cloud Shell or AWS CloudShell and run it there.")
     sys.exit(1)
 
 import http.client
@@ -47,7 +65,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, List, Optional, Tuple
@@ -55,7 +73,7 @@ from xml.sax.saxutils import escape
 
 # ---------------------------------------------------------------- config
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 ONE_LINER = "curl -fsSL https://zoorik.com/assess/disks | python3 -"
 SEND_TO = "founders@zoorik.com"
 
@@ -72,6 +90,25 @@ SKUS_API = "2021-07-01"
 METRICS_API = "2023-10-01"
 METRICS = ("Composite Disk Read Operations/sec", "Composite Disk Write Operations/sec",
            "Composite Disk Read Bytes/sec", "Composite Disk Write Bytes/sec")
+
+CLOUD_NAMES = {"azure": "Azure", "aws": "AWS"}
+# MB/s in the report: 10^6 bytes per second on Azure; on AWS MiB/s, the unit gp3 throughput is set in.
+MB = {"azure": 1e6, "aws": float(2 ** 20)}
+AWS_ENV = dict(os.environ, AWS_PAGER="")
+PRICE_LIST_REGION = "us-east-1"
+LIVE_STATES = "Name=instance-state-name,Values=pending,running,stopping,stopped"
+SSM_DOCUMENT = "AWS-RunShellScript"
+SSM_PERMISSIONS = "ssm:SendCommand and ssm:GetCommandInvocation"
+SSM_EXECUTION_SECONDS = 120
+SSM_POLL_SECONDS = 3
+# CloudWatch keeps 1-minute EBS data points; an hour's Maximum / 60 is its busiest minute, per second.
+EBS_METRICS = (("VolumeReadOps", True, False), ("VolumeWriteOps", True, True),
+               ("VolumeReadBytes", False, False), ("VolumeWriteBytes", False, True))
+EBS_PRICE_FAMILIES = ("Storage", "System Operation", "Provisioned Throughput")
+# What each EBS type bills besides its GB, as Amoeba prices it: gp3 the IOPS above 3,000 and the MB/s above 125,
+# io1 and io2 every IOPS (io2 in bands, its tiers 2 and 3 from 32,000 and 64,000), the others their GB only.
+EBS_BILLS = {"gp3": ("iops", "mbps"), "gp2": (), "io1": ("iops",), "io2": ("iops",), "st1": (), "sc1": ()}
+IO2_TIER_STARTS = {2: 32000, 3: 64000}
 
 # How Zoorik Amoeba sizes a pool: the same rules and numbers the product plans with.
 HEADROOM_FRACTION = 0.20
@@ -105,6 +142,27 @@ V2_MAX_IOPS_PER_GIB = 500
 V2_MBPS_PER_IOPS = 0.25
 V2_MAX_MBPS = 2000
 
+# How Zoorik Amoeba lays out a new pool on AWS, from its current planner: the hold size, then equal gp3 volumes.
+GP3 = "gp3"
+# The band every VM starts with: Amoeba keeps its pool 80-90% full.
+BAND_LOW = 0.80
+BAND_HIGH = 0.90
+URGENT_USED = 0.95
+FREE_FLOOR_GIB = 10
+BTRFS_OVERHEAD = 0.03
+MIN_MEMBERS = 2
+GP3_BASE_IOPS = 3000
+GP3_BASE_MBPS = 125
+GP3_MAX_IOPS = 80000
+GP3_IOPS_PER_GIB = 500
+GP3_MAX_MBPS = 2000
+GP3_MBPS_PER_IOPS = 0.25
+GP3_MAX_GIB = 16384
+# EBS slots as Amoeba counts them: device names /dev/sdf to /dev/sdz, and AWS's shared Nitro limit for a type
+# that reports none.
+EBS_DEVICE_NAMES = 21
+NITRO_SHARED_LIMIT = 28
+
 # The pool goes on Premium SSD v2 wherever the VM's region and zone offer it, otherwise on Premium SSD.
 POOL_V2 = "Premium SSD v2"
 POOL_V1 = "Premium SSD"
@@ -134,25 +192,39 @@ DISK_TYPES = {
     "standard_lrs": ("S", "LRS", "Standard HDD"),
     "premiumv2_lrs": ("V2", "LRS", "Premium SSD v2"),
     "ultrassd_lrs": ("ULTRA", "LRS", "Ultra Disk"),
+    "gp3": ("EBS", "", "gp3"),
+    "gp2": ("EBS", "", "gp2"),
+    "io1": ("EBS", "", "io1"),
+    "io2": ("EBS", "", "io2"),
+    "st1": ("EBS", "", "st1"),
+    "sc1": ("EBS", "", "sc1"),
+    "standard": ("EBS", "", "magnetic (standard)"),
 }
 TIER_PRODUCTS = ("Premium SSD Managed Disks", "Standard SSD Managed Disks", "Standard HDD Managed Disks")
 PROVISIONED_PRODUCTS = {"Azure Premium SSD v2": "Premium LRS ", "Ultra Disks": "Ultra LRS "}
 PROVISIONED_METERS = {"Provisioned Capacity": "capacity", "Provisioned IOPS": "iops",
                       "Provisioned Throughput (MBps)": "mbps"}
 RHEL_FAMILY = ("rhel", "centos", "rocky", "almalinux", "ol")
+# A distribution whose ID_LIKE names one of these is RHEL-family too, as Amoeba's agent reads it: Amazon Linux is.
+RHEL_LIKE = ("rhel", "centos", "fedora")
 OS_NAMES = {"ubuntu": "Ubuntu", "debian": "Debian", "rhel": "RHEL", "centos": "CentOS", "rocky": "Rocky Linux",
             "almalinux": "AlmaLinux", "ol": "Oracle Linux", "sles": "SLES", "sles_sap": "SLES for SAP",
             "opensuse-leap": "openSUSE Leap", "azurelinux": "Azure Linux", "mariner": "CBL-Mariner",
-            "fedora": "Fedora", "flatcar": "Flatcar"}
+            "fedora": "Fedora", "flatcar": "Flatcar", "amzn": "Amazon Linux"}
 
-# The one command that runs inside a VM, and only after a yes. It only reads.
-GUEST_SCRIPT = r"""echo S
+# The one command that runs inside a VM, and only after a yes. It only reads. The two clouds differ only in how a
+# data disk shows in the VM: by LUN on Azure, by volume id (an NVMe serial) on AWS.
+_GUEST_HEAD = r"""echo S
 echo "K $(uname -r)"
 grep -E '^(ID|ID_LIKE|VERSION_ID)=' /etc/os-release
 if grep -qw btrfs /proc/filesystems; then echo "B loaded"; elif modinfo -n btrfs >/dev/null 2>&1; then echo "B module"; else echo "B absent"; fi
-for l in /dev/disk/azure/scsi1/lun*; do n=${l##*/lun}; case $n in ''|*[!0-9]*) continue;; esac; echo "L $n $(lsblk -nro MOUNTPOINT "$l" | tr '\n' ' ')"; done
+"""
+_GUEST_TAIL = r"""
 timeout 30 df -P -B1 -T -l | awk '$1 ~ /^\/dev\// && $1 !~ /^\/dev\/loop/ {m=$7; for (i=8; i<=NF; i++) m=m" "$i; print "D", $2, $3, $4, m}'
 echo E"""
+_AZURE_DISKS = r"""for l in /dev/disk/azure/scsi1/lun*; do n=${l##*/lun}; case $n in ''|*[!0-9]*) continue;; esac; echo "L $n $(lsblk -nro MOUNTPOINT "$l" | tr '\n' ' ')"; done"""
+_AWS_DISKS = r"""for l in /dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_vol*; do case $l in *-part*) continue;; esac; [ -e "$l" ] || continue; v=${l##*_vol}; echo "V vol-${v%%[-_]*} $(lsblk -nro MOUNTPOINT "$l" | tr '\n' ' ')"; done"""
+GUEST_SCRIPT = {"azure": _GUEST_HEAD + _AZURE_DISKS + _GUEST_TAIL, "aws": _GUEST_HEAD + _AWS_DISKS + _GUEST_TAIL}
 
 
 def say(text: str = "", end: str = "\n") -> None:
@@ -163,6 +235,10 @@ def say(text: str = "", end: str = "\n") -> None:
 
 class Failed(Exception):
     """An expected failure, carried as a short reason."""
+
+
+class Overloaded(Failed):
+    """The pool fits the VM, but cannot carry the measured load."""
 
 
 _REASONS = (
@@ -181,6 +257,17 @@ _REASONS = (
     ("toomanyrequests", "Azure is throttling requests; try again later"),
     ("subscriptionnotfound", "subscription not found"),
     ("resourcenotfound", "not found"),
+    ("ssm:sendcommand", "no permission to use Systems Manager Run Command (ssm:SendCommand)"),
+    ("ssm:getcommandinvocation", "no permission to read Run Command results (ssm:GetCommandInvocation)"),
+    ("invocationdoesnotexist", "the command has not reached the instance yet"),
+    ("invalidinstanceid", "Systems Manager cannot reach this instance"),
+    ("unable to locate credentials", "no AWS credentials; run aws configure or aws sso login"),
+    ("token has expired", "AWS sign-in has expired; run aws sso login"),
+    ("expiredtoken", "AWS credentials have expired"),
+    ("accessdenied", "access denied"),
+    ("unauthorizedoperation", "access denied"),
+    ("optinrequired", "region not enabled for this account"),
+    ("requestlimitexceeded", "AWS is throttling requests; try again later"),
     ("timed out", "no answer in time"),
 )
 
@@ -197,31 +284,79 @@ def reason(text: str) -> str:
     return line[:100]
 
 
+THROTTLED = re.compile(r"\b429\b|toomanyrequests|throttl|requestlimitexceeded|rate exceeded", re.IGNORECASE)
+CMD_SPECIAL = re.compile(r'["&|<>^%()\r\n]')
+# On Windows the CLIs run in their own process group, so Ctrl-C stops only the script: a call in flight finishes on
+# its own, and the worker waiting on it starts nothing new before the script leaves.
+NEW_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+# On Windows, the folder that holds the az arguments cmd.exe would change; main() removes it however the run ends.
+ARG_DIR = ""
+
+
+def decoded(data: bytes) -> str:
+    """CLI output as text, with Windows line ends made plain: UTF-8, or on Windows the console code page, which az
+    writes in when its output is piped."""
+    try:
+        out = data.decode("utf-8")
+    except UnicodeDecodeError:
+        out = data.decode("mbcs" if os.name == "nt" else "utf-8", "replace")
+    return out.replace("\r\n", "\n")
+
+
+def arg_file(value: str, files: List[str]) -> str:
+    """On Windows az is az.cmd, whose arguments cmd.exe reads again, so a value it would change goes in a file
+    that az reads instead (@path)."""
+    fd, path = tempfile.mkstemp(prefix="zoorik-", dir=ARG_DIR or None)
+    with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+        f.write(value)
+    files.append(path)
+    return "@" + path
+
+
+def cli(cmd: List[str], timeout: float, env: Dict[str, str]):
+    """Run one az or aws command and return its JSON output, or raise Failed. It retries when the cloud throttles."""
+    cloud = "Azure" if cmd[0] == "az" else "AWS"
+    files: List[str] = []
+    if os.name == "nt" and cmd[0] == "az":
+        cmd = cmd[:1] + [arg_file(a, files) if CMD_SPECIAL.search(a) else a for a in cmd[1:]]
+    try:
+        for attempt in range(3):
+            try:
+                p = subprocess.run([shutil.which(cmd[0]) or cmd[0]] + cmd[1:], stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, env=env,
+                                   creationflags=NEW_GROUP)
+            except FileNotFoundError:
+                raise Failed(f"the {cloud} CLI ({cmd[0]}) is not installed") from None
+            except subprocess.TimeoutExpired:
+                raise Failed(f"no answer within {max(1, round(timeout / 60))} min") from None
+            out = decoded(p.stdout)
+            if p.returncode == 0:
+                try:
+                    return json.loads(out or "null")
+                except ValueError:
+                    raise Failed(f"unexpected {cmd[0]} output") from None
+            error = decoded(p.stderr) or out
+            if attempt < 2 and THROTTLED.search(error):
+                time.sleep(5 * (attempt + 1))
+                continue
+            raise Failed(reason(error))
+        raise Failed(f"{cloud} is throttling requests; try again later")
+    finally:
+        for path in files:
+            os.remove(path)
+
+
 def az(args: List[str], timeout: float = 120):
-    """Run one az command and return its JSON output, or raise Failed. Every Azure call goes through here.
+    """One az command. Every Azure call goes through here.
 
     The Azure CLI's own usage telemetry is switched off for these calls only; your az settings stay as they are."""
-    for attempt in range(3):
-        try:
-            p = subprocess.run(["az"] + list(args) + ["-o", "json", "--only-show-errors"], stdin=subprocess.DEVNULL,
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout,
-                               encoding="utf-8", errors="replace",
-                               env=dict(os.environ, AZURE_CORE_COLLECT_TELEMETRY="false"))
-        except FileNotFoundError:
-            raise Failed("the Azure CLI (az) is not installed") from None
-        except subprocess.TimeoutExpired:
-            raise Failed(f"no answer within {max(1, round(timeout / 60))} min") from None
-        if p.returncode == 0:
-            try:
-                return json.loads(p.stdout or "null")
-            except ValueError:
-                raise Failed("unexpected az output") from None
-        error = p.stderr or p.stdout
-        if attempt < 2 and re.search(r"\b429\b|toomanyrequests|throttl", error, re.IGNORECASE):
-            time.sleep(5 * (attempt + 1))
-            continue
-        raise Failed(reason(error))
-    raise Failed("Azure is throttling requests; try again later")
+    return cli(["az"] + list(args) + ["-o", "json", "--only-show-errors"], timeout,
+               dict(os.environ, AZURE_CORE_COLLECT_TELEMETRY="false"))
+
+
+def aws(args: List[str], region: str, timeout: float = 120):
+    """One aws command in one region. Every AWS call goes through here, with the AWS CLI's pager off."""
+    return cli(["aws"] + list(args) + ["--output", "json", "--region", region], timeout, AWS_ENV)
 
 
 def rest(method: str, url: str, body: Optional[dict] = None, timeout: float = 120):
@@ -268,10 +403,15 @@ def parallel(func: Callable, items: list, label: str) -> list:
     say(f"\r{label}: 0/{len(items)}", end="")
     ex = ThreadPoolExecutor(WORKERS)
     futures = {ex.submit(guarded, item): i for i, item in enumerate(items)}
+    pending = set(futures)
     try:
-        for done, fut in enumerate(as_completed(futures), 1):
-            results[futures[fut]] = fut.result()
-            say(f"\r{label}: {done}/{len(items)}", end="")
+        while pending:
+            # Short waits: before Python 3.14, Ctrl-C on Windows reaches no thread that waits without a timeout.
+            done, pending = wait(pending, timeout=0.25, return_when=FIRST_COMPLETED)
+            for fut in done:
+                results[futures[fut]] = fut.result()
+            if done:
+                say(f"\r{label}: {len(items) - len(pending)}/{len(items)}", end="")
     except BaseException:
         for fut in futures:
             fut.cancel()
@@ -283,21 +423,31 @@ def parallel(func: Callable, items: list, label: str) -> list:
 
 
 def ask(question: str) -> Optional[bool]:
-    """Ask y/N on the terminal. The script itself arrives on stdin, so the answer is read from /dev/tty.
+    """Ask y/N on the terminal. The script may arrive on stdin, so on Linux and macOS the answer is read from
+    /dev/tty; on Windows from the console, when stdin is one.
 
     Keys pressed before the question appears are discarded, so only an answer to it counts.
     Returns None when there is no terminal to ask on."""
-    try:
-        with open("/dev/tty", encoding="utf-8", errors="replace") as tty:
-            try:
-                import termios
-                termios.tcflush(tty.fileno(), termios.TCIFLUSH)
-            except Exception:
-                pass
-            say(question, end="")
-            answer = tty.readline()
-    except OSError:
-        return None
+    if os.name == "nt":
+        if not sys.stdin.isatty():
+            return None
+        import msvcrt
+        while msvcrt.kbhit():
+            msvcrt.getwch()
+        say(question, end="")
+        answer = sys.stdin.readline()
+    else:
+        try:
+            with open("/dev/tty", encoding="utf-8", errors="replace") as tty:
+                try:
+                    import termios
+                    termios.tcflush(tty.fileno(), termios.TCIFLUSH)
+                except Exception:
+                    pass
+                say(question, end="")
+                answer = tty.readline()
+        except OSError:
+            return None
     if not answer.endswith("\n"):
         say()
     return answer.strip().lower() in ("y", "yes")
@@ -307,12 +457,18 @@ def ask(question: str) -> Optional[bool]:
 
 @dataclass
 class Subscription:
+    """What one scan covers: an Azure subscription, or one region of the AWS account (tenant is the account)."""
     id: str
     name: str
     tenant: str
     vms: int = 0
     disks: int = 0
     note: str = ""
+    cloud: str = "azure"
+
+
+# Per hour of the metric window: (IOPS, bytes/s, write IOPS, write bytes/s), reads and writes added.
+Hourly = Dict[str, Tuple[float, float, float, float]]
 
 
 @dataclass
@@ -332,10 +488,12 @@ class Disk:
     created: str
     detached: str
     max_shares: int = 1
+    multi_attach: bool = False
+    cloud: str = "azure"
     price: Optional[float] = None
     price_tier: str = ""
     price_note: str = ""
-    hourly: Optional[Dict[str, Tuple[float, float]]] = None
+    hourly: Optional[Hourly] = None
     metric_note: str = ""
 
     @property
@@ -344,13 +502,13 @@ class Disk:
 
     @property
     def shared(self) -> bool:
-        return self.max_shares > 1
+        return self.max_shares > 1 or self.multi_attach
 
     def peak(self) -> Tuple[Optional[float], Optional[float]]:
         """Peak IOPS and MB/s over the metric window."""
         if not self.hourly:
             return None, None
-        return max(v[0] for v in self.hourly.values()), max(v[1] for v in self.hourly.values()) / 1e6
+        return max(v[0] for v in self.hourly.values()), max(v[1] for v in self.hourly.values()) / MB[self.cloud]
 
 
 @dataclass
@@ -359,6 +517,7 @@ class DataDisk:
     size_gb: int
     disk: Optional[Disk]
     note: str = ""
+    device: str = ""
 
 
 @dataclass
@@ -370,6 +529,7 @@ class Guest:
     btrfs: str = ""
     luns: Dict[int, List[str]] = field(default_factory=dict)
     mounts: Dict[str, Tuple[str, int]] = field(default_factory=dict)
+    volumes: Dict[str, List[str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -386,12 +546,16 @@ class Vm:
     os_name: str
     os_version: str
     data: List[DataDisk]
+    cloud: str = "azure"
     slots: Optional[int] = None
+    free_slots: Optional[int] = None
     uncached_iops: int = 0
     uncached_mbps: int = 0
     facts_note: str = ""
     pool_v2: Optional[bool] = None
+    nvme: Optional[bool] = None
     managed_by: str = ""
+    channel: str = ""
     guest: Optional[Guest] = None
     guest_note: str = ""
     lane: str = ""
@@ -421,10 +585,31 @@ class RegionFacts:
 
 
 @dataclass
+class EbsRate:
+    """One EBS type's list prices per month: per GB, per IOPS by band start, per MB/s, above what it includes."""
+    gib: float
+    iops: Dict[int, float] = field(default_factory=dict)
+    included_iops: int = 0
+    mbps: Optional[float] = None
+    included_mbps: int = 0
+
+
+@dataclass
 class Prices:
     tiers: Dict[str, float] = field(default_factory=dict)
     v2: Dict[str, Dict[float, float]] = field(default_factory=dict)
     ultra: Dict[str, Dict[float, float]] = field(default_factory=dict)
+    ebs: Dict[str, EbsRate] = field(default_factory=dict)
+
+
+@dataclass
+class Scan:
+    """One cloud's part of the run: the Azure directory and its subscriptions, or the AWS account and its regions."""
+    cloud: str
+    label: str
+    scopes: List[Subscription]
+    skipped: List[Subscription] = field(default_factory=list)
+    guest_answer: str = "no running Linux VM with data disks to read"
 
 
 def r2(value: float) -> float:
@@ -573,6 +758,137 @@ def inventory(subs: List[Subscription]) -> Tuple[List[Vm], List[Disk]]:
     return vms, disk_list
 
 
+# ---------------------------------------------------------------- AWS inventory
+
+SLOT_DEVICE = re.compile(r"/dev/(?:sd|xvd)([f-z])")
+
+
+def aws_home() -> str:
+    return os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1"
+
+
+def aws_signed_in() -> Tuple[str, List[Subscription]]:
+    """Return (the AWS account, its enabled regions to scan); the home region alone when they cannot be listed."""
+    home = aws_home()
+    account = (aws(["sts", "get-caller-identity"], home) or {}).get("Account", "")
+    try:
+        names = aws(["ec2", "describe-regions", "--query", "Regions[].RegionName"], home) or [home]
+    except Failed as e:
+        say(f"AWS: could not list regions ({e}); reading {home} only")
+        names = [home]
+    return account, [Subscription(r, r, account, cloud="aws") for r in sorted(names)]
+
+
+def tags(item: dict) -> Dict[str, str]:
+    return {t.get("Key"): t.get("Value") for t in item.get("Tags") or []}
+
+
+def make_volume(v: dict, account: str, region: str) -> Disk:
+    kind = v.get("VolumeType") or ""
+    return Disk(id=v.get("VolumeId") or "", name=tags(v).get("Name") or v.get("VolumeId") or "", subscription=account,
+                resource_group="", region=region, sku=kind, size_gb=int(v.get("Size") or 0), tier="",
+                state="Unattached" if v.get("State") == "available" else (v.get("State") or "").capitalize(),
+                iops=v.get("Iops"), mbps=v.get("Throughput") if kind == GP3 else None, ade=False,
+                created=v.get("CreateTime") or "", detached="", multi_attach=v.get("MultiAttachEnabled") is True,
+                cloud="aws")
+
+
+def make_instance(i: dict, account: str, region: str, volumes: Dict[str, Disk]) -> Vm:
+    """One EC2 instance with its data volumes: every EBS volume attached to it but its root volume."""
+    data = []
+    for m in sorted(i.get("BlockDeviceMappings") or [], key=lambda m: m.get("DeviceName") or ""):
+        volume = (m.get("Ebs") or {}).get("VolumeId")
+        if not volume or m.get("DeviceName") == i.get("RootDeviceName"):
+            continue
+        disk = volumes.get(volume)
+        data.append(DataDisk(lun=len(data), size_gb=disk.size_gb if disk else 0, disk=disk,
+                             note="" if disk else "volume details not readable", device=m.get("DeviceName") or ""))
+    return Vm(id=i.get("InstanceId") or "", name=tags(i).get("Name") or i.get("InstanceId") or "",
+              subscription=account, resource_group="", region=region,
+              zone=(i.get("Placement") or {}).get("AvailabilityZone") or "", size=i.get("InstanceType") or "",
+              os_type="Windows" if (i.get("Platform") or "").lower() == "windows" else "Linux",
+              power=((i.get("State") or {}).get("Name") or "").capitalize(), os_name=i.get("PlatformDetails") or "",
+              os_version="", data=data, cloud="aws")
+
+
+def ebs_limits(vm: Vm, instance: dict, itype: dict) -> None:
+    """The instance's data-volume slots and EBS limits, as Amoeba counts them: the type's attachment limit less the
+    root volume and, where the limit is shared, the network interfaces and NVMe instance-store disks, within the
+    device names /dev/sdf to /dev/sdz."""
+    ebs = itype.get("EbsInfo") or {}
+    limit = ebs.get("MaximumEbsAttachments")
+    shared = limit is None or (ebs.get("AttachmentLimitType") or "").lower() == "shared"
+    store = itype.get("InstanceStorageInfo") or {}
+    store_disks = 0 if store.get("NvmeSupport") == "unsupported" else sum(d.get("Count") or 0
+                                                                          for d in store.get("Disks") or [])
+    others = 1 + (1 + store_disks if shared else 0)
+    type_slots = max(0, min(EBS_DEVICE_NAMES, (NITRO_SHARED_LIMIT if limit is None else limit) - others))
+    interfaces = max(0, len(instance.get("NetworkInterfaces") or []) - 1) if shared else 0
+    held = [ord(m.group(1)) - ord("f") for m in (SLOT_DEVICE.fullmatch(dd.device) for dd in vm.data) if m]
+    vm.free_slots = max(0, min(type_slots - interfaces - len(vm.data), EBS_DEVICE_NAMES - 1 - max(held, default=-1)))
+    vm.slots = len(vm.data) + vm.free_slots
+    optimized = ebs.get("EbsOptimizedInfo") or {}
+    vm.uncached_iops = int(optimized.get("BaselineIops") or 0)
+    vm.uncached_mbps = int(optimized.get("BaselineThroughputInMBps") or 0)
+    vm.nvme = ebs.get("NvmeSupport") == "required"
+
+
+def instance_types(names: List[str], region: str) -> Dict[str, dict]:
+    types = {}
+    for i in range(0, len(names), 100):
+        out = aws(["ec2", "describe-instance-types", "--instance-types"] + names[i:i + 100], region) or {}
+        types.update({t.get("InstanceType"): t for t in out.get("InstanceTypes") or []})
+    return types
+
+
+def aws_region(scope: Subscription) -> Tuple[List[Vm], List[Disk]]:
+    """One region's instances and EBS volumes, each instance type's EBS limits, and which instances Systems Manager
+    manages."""
+    region, account = scope.id, scope.tenant
+    reservations = (aws(["ec2", "describe-instances", "--filters", LIVE_STATES], region) or {}).get("Reservations")
+    instances = [i for r in reservations or [] for i in r.get("Instances") or []]
+    volumes = {v.get("VolumeId"): make_volume(v, account, region)
+               for v in (aws(["ec2", "describe-volumes"], region) or {}).get("Volumes") or []}
+    vms = [make_instance(i, account, region, volumes) for i in instances]
+    try:
+        types, missing = instance_types(sorted({v.size for v in vms if v.size}), region), ""
+    except Failed as e:
+        types, missing = {}, f"instance type limits not readable: {e}"
+    for v, i in zip(vms, instances):
+        if v.size in types:
+            ebs_limits(v, i, types[v.size])
+        else:
+            v.facts_note = missing or f"{v.size or 'instance type'} not listed in {region}"
+    if any(v.linux and v.data for v in vms):
+        try:
+            found = aws(["ssm", "describe-instance-information", "--filters", "Key=PingStatus,Values=Online",
+                         "Key=ResourceType,Values=EC2Instance"], region) or {}
+            managed, unmanaged = {m.get("InstanceId"): m for m in found.get("InstanceInformationList") or []}, ""
+        except Failed as e:
+            managed, unmanaged = {}, f"Systems Manager not readable: {e}"
+        for v in vms:
+            info = managed.get(v.id)
+            if info:
+                v.os_name, v.os_version = info.get("PlatformName") or v.os_name, info.get("PlatformVersion") or ""
+            else:
+                v.channel = unmanaged or "Systems Manager does not manage it (no SSM agent reporting)"
+    return vms, list(volumes.values())
+
+
+def aws_inventory(regions: List[Subscription]) -> Tuple[List[Vm], List[Disk]]:
+    """Every EC2 instance and EBS volume in the regions, a few regions at a time; a region that fails has its note."""
+    vms: List[Vm] = []
+    disks: List[Disk] = []
+    for s, result in zip(regions, parallel(aws_region, regions, "Reading AWS regions")):
+        if isinstance(result, Failed):
+            s.note = str(result)
+            continue
+        s.vms, s.disks = len(result[0]), len(result[1])
+        vms += result[0]
+        disks += result[1]
+    return vms, disks
+
+
 # ---------------------------------------------------------------- VM sizes and prices
 
 def region_facts(key: Tuple[str, str]) -> RegionFacts:
@@ -676,6 +992,8 @@ def price_disk(d: Disk, prices: Dict[str, Optional[Prices]]) -> None:
     """Set the disk's list price per month, or the reason it has none."""
     family, redundancy, label = DISK_TYPES.get(d.sku.lower(), ("", "", d.sku))
     region_price = prices.get(d.region)
+    if d.cloud == "aws":
+        return price_volume(d, region_price)
     if not family:
         d.price_note = f"{d.sku or 'unknown'} disks are not priced"
         return
@@ -705,20 +1023,138 @@ def price_disk(d: Disk, prices: Dict[str, Optional[Prices]]) -> None:
         d.price_note = f"no list price for {tier} {redundancy} in {d.region}"
 
 
+def ebs_prices(region: str) -> Prices:
+    """EBS list prices in one region from the AWS Price List API (on-demand, USD), read as Amoeba reads them."""
+    served: Dict[str, dict] = {}
+    for family in EBS_PRICE_FAMILIES:
+        terms = [{"Type": "TERM_MATCH", "Field": "regionCode", "Value": region},
+                 {"Type": "TERM_MATCH", "Field": "productFamily", "Value": family}]
+        out = aws(["pricing", "get-products", "--service-code", "AmazonEC2", "--format-version", "aws_v1",
+                   "--filters", json.dumps(terms)], PRICE_LIST_REGION, 180) or {}
+        for raw in out.get("PriceList") or []:
+            add_ebs_price(served, family, json.loads(raw) if isinstance(raw, str) else raw)
+    prices = Prices()
+    for kind, bills in EBS_BILLS.items():
+        rate = ebs_rate(served.get(kind), bills)
+        if rate:
+            prices.ebs[kind] = rate
+    return prices
+
+
+def add_ebs_price(served: Dict[str, dict], family: str, item: dict) -> None:
+    """Add each on-demand USD price of one price-list product to its volume type, by the unit it bills."""
+    attributes = (item.get("product") or {}).get("attributes") or {}
+    kind = (attributes.get("volumeApiName") or "").lower()
+    if not kind:
+        return
+    found = served.setdefault(kind, {"gib": [], "iops": {}, "mbps": []})
+    for term in ((item.get("terms") or {}).get("OnDemand") or {}).values():
+        for dim in (term.get("priceDimensions") or {}).values():
+            try:
+                usd = float((dim.get("pricePerUnit") or {}).get("USD"))
+            except (TypeError, ValueError):
+                continue
+            unit = (dim.get("unit") or "").lower()
+            if usd <= 0:
+                continue
+            if family == "Storage" and unit == "gb-mo":
+                found["gib"].append(usd)
+            elif family == "System Operation" and unit == "iops-mo":
+                found["iops"].setdefault(iops_band(dim, attributes.get("usagetype") or ""), []).append(usd)
+            elif family == "Provisioned Throughput" and unit in ("gibps-mo", "mibps-mo"):
+                found["mbps"].append(usd / 1024 if unit == "gibps-mo" else usd)
+
+
+def iops_band(dim: dict, usage: str) -> int:
+    """The IOPS a price starts at: its begin range, else its io2 tier's start; -1 for a tier not known."""
+    try:
+        begin = int(float(dim.get("beginRange") or 0))
+    except (TypeError, ValueError):
+        begin = 0
+    if begin > 0:
+        return begin
+    tier = re.search(r"\.tier(\d+)$", usage)
+    return IO2_TIER_STARTS.get(int(tier.group(1)), -1) if tier else 0
+
+
+def ebs_rate(found: Optional[dict], bills: Tuple[str, ...]) -> Optional[EbsRate]:
+    """The type's rate when the price list gives one price for every unit it bills, else None: two products that
+    disagree leave the unit unpriced."""
+    def single(values: list) -> Optional[float]:
+        return values[0] if values and all(v == values[0] for v in values) else None
+
+    gib = single(found["gib"]) if found else None
+    if gib is None:
+        return None
+    rate = EbsRate(gib=gib)
+    if "iops" in bills:
+        rate.iops = {start: single(usd) for start, usd in found["iops"].items()}
+        if not rate.iops or any(start < 0 or usd is None for start, usd in rate.iops.items()):
+            return None
+        if "mbps" in bills:
+            rate.included_iops, rate.included_mbps, rate.mbps = GP3_BASE_IOPS, GP3_BASE_MBPS, single(found["mbps"])
+            if min(rate.iops) > GP3_BASE_IOPS or rate.mbps is None:
+                return None
+        elif min(rate.iops) != 0:
+            return None
+    return rate
+
+
+def ebs_monthly(rate: EbsRate, gib: float, iops: Optional[int], mbps: Optional[int]) -> float:
+    """$/month of one EBS volume: its GB, plus each IOPS and MB/s above what its type includes, at its band's rate."""
+    usd = rate.gib * gib
+    if iops and iops > rate.included_iops:
+        bands = sorted(rate.iops.items())
+        for i, (start, price) in enumerate(bands):
+            low, high = max(start, rate.included_iops), bands[i + 1][0] if i + 1 < len(bands) else float("inf")
+            if iops > low:
+                usd += (min(iops, high) - low) * price
+    if mbps and mbps > rate.included_mbps and rate.mbps is not None:
+        usd += (mbps - rate.included_mbps) * rate.mbps
+    return r2(usd)
+
+
+def price_volume(d: Disk, region_price: Optional[Prices]) -> None:
+    """Set the EBS volume's list price per month from its type, size, IOPS and (gp3) MB/s, or the reason it has none."""
+    if region_price is None:
+        d.price_note = "price list not readable for " + d.region
+        return
+    rate = region_price.ebs.get(d.sku.lower())
+    if rate is None:
+        d.price_note = ("magnetic (standard) volumes bill each I/O request; not priced" if d.sku == "standard"
+                        else f"no {d.sku or 'unknown'} list price in {d.region}")
+        return
+    d.price = ebs_monthly(rate, d.size_gb, d.iops, d.mbps)
+
+
 # ---------------------------------------------------------------- measured performance
 
-def disk_metrics(disk: Disk) -> Dict[str, Tuple[float, float]]:
+def metric_window() -> Tuple[datetime, datetime]:
+    end = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    return end - timedelta(days=METRIC_DAYS), end
+
+
+def add_hour(hours: Hourly, stamp: str, ops: bool, write: bool, value: float) -> None:
+    """Add one metric's figure to its hour: to the IOPS or the bytes/s, and for writes also to the write figure."""
+    h = list(hours.get(stamp, (0.0, 0.0, 0.0, 0.0)))
+    i = 0 if ops else 1
+    h[i] += value
+    if write:
+        h[i + 2] += value
+    hours[stamp] = (h[0], h[1], h[2], h[3])
+
+
+def disk_metrics(disk: Disk) -> Hourly:
     """IOPS and bytes/s of one disk for each hour of the last 14 days: the busiest minute of the hour (Maximum),
     reads plus writes, or the hour's average where Azure Monitor gives no maximum."""
-    end = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
-    start = end - timedelta(days=METRIC_DAYS)
+    start, end = metric_window()
     query = urllib.parse.urlencode({"api-version": METRICS_API, "metricnames": ",".join(METRICS),
                                     "timespan": f"{iso(start)}/{iso(end)}", "interval": "PT1H",
                                     "aggregation": "Average,Maximum"}, quote_via=urllib.parse.quote)
     data = rest("get", f"{disk.id}/providers/Microsoft.Insights/metrics?{query}") or {}
-    hours: Dict[str, Tuple[float, float]] = {}
+    hours: Hourly = {}
     for metric in data.get("value") or []:
-        is_ops = "Operations" in ((metric.get("name") or {}).get("value") or "")
+        name = (metric.get("name") or {}).get("value") or ""
         for series in metric.get("timeseries") or []:
             for point in series.get("data") or []:
                 value, stamp = point.get("maximum"), point.get("timeStamp")
@@ -726,25 +1162,74 @@ def disk_metrics(disk: Disk) -> Dict[str, Tuple[float, float]]:
                     value = point.get("average")
                 if not isinstance(value, (int, float)) or not stamp:
                     continue
-                ops, rate = hours.get(stamp, (0.0, 0.0))
-                hours[stamp] = (ops + value, rate) if is_ops else (ops, rate + value)
+                add_hour(hours, stamp, "Operations" in name, "Write" in name, value)
+    return hours
+
+
+def volume_metrics(disk: Disk) -> Hourly:
+    """IOPS and bytes/s of one EBS volume for each hour of the last 14 days, from CloudWatch: the busiest minute of
+    the hour (the Maximum of its 1-minute data points, divided by 60), reads plus writes."""
+    start, end = metric_window()
+    hours: Hourly = {}
+    for metric, ops, write in EBS_METRICS:
+        out = aws(["cloudwatch", "get-metric-statistics", "--namespace", "AWS/EBS", "--metric-name", metric,
+                   "--dimensions", f"Name=VolumeId,Value={disk.id}", "--start-time", iso(start), "--end-time",
+                   iso(end), "--period", "3600", "--statistics", "Maximum"], disk.region) or {}
+        for point in out.get("Datapoints") or []:
+            value, stamp = point.get("Maximum"), point.get("Timestamp")
+            if isinstance(value, (int, float)) and stamp:
+                add_hour(hours, stamp, ops, write, value / 60)
     return hours
 
 
 # ---------------------------------------------------------------- inside the VM
 
-RUN_COMMAND_STARTED: List[str] = []
+RUN_COMMAND_STARTED: Dict[str, List[str]] = {"azure": [], "aws": []}
+# The instances where Systems Manager took the command and gave back its id; a refused send-command ran nothing.
+RUN_COMMAND_SENT: List[str] = []
 
 
 def read_guest(vm: Vm) -> Guest:
     """Run the command that only reads in the VM through Azure Run Command and parse what it printed."""
-    RUN_COMMAND_STARTED.append(vm.id)
+    RUN_COMMAND_STARTED["azure"].append(vm.id)
     out = az(["vm", "run-command", "invoke", "--ids", vm.id, "--command-id", "RunShellScript",
-              "--scripts", GUEST_SCRIPT], RUN_COMMAND_TIMEOUT) or {}
+              "--scripts", GUEST_SCRIPT["azure"]], RUN_COMMAND_TIMEOUT) or {}
     message = "".join(str((v or {}).get("message") or "") for v in out.get("value") or [])
     if "[stdout]" in message:
         message = message.split("[stdout]", 1)[1].split("[stderr]", 1)[0]
     return parse_guest(message)
+
+
+def read_instance(vm: Vm) -> Guest:
+    """Run the command that only reads in the instance through AWS Systems Manager Run Command, wait for it, and
+    parse what it printed. Its volumes are matched to the instance's data volumes by volume id."""
+    RUN_COMMAND_STARTED["aws"].append(vm.id)
+    parameters = {"commands": GUEST_SCRIPT["aws"].splitlines(), "executionTimeout": [str(SSM_EXECUTION_SECONDS)]}
+    sent = aws(["ssm", "send-command", "--instance-ids", vm.id, "--document-name", SSM_DOCUMENT,
+                "--comment", "Zoorik disk assessment: reads disk usage", "--timeout-seconds", str(RUN_COMMAND_TIMEOUT),
+                "--parameters", json.dumps(parameters)], vm.region) or {}
+    command = (sent.get("Command") or {}).get("CommandId")
+    if not command:
+        raise Failed("Systems Manager did not start the command")
+    RUN_COMMAND_SENT.append(vm.id)
+    deadline = time.monotonic() + RUN_COMMAND_TIMEOUT
+    while time.monotonic() < deadline:
+        time.sleep(SSM_POLL_SECONDS)
+        try:
+            out = aws(["ssm", "get-command-invocation", "--command-id", command, "--instance-id", vm.id],
+                      vm.region) or {}
+        except Failed as e:
+            if str(e) == reason("invocationdoesnotexist"):
+                continue
+            raise
+        status = out.get("Status") or ""
+        if status == "Success":
+            g = parse_guest(out.get("StandardOutputContent") or "")
+            g.luns = {dd.lun: g.volumes[dd.disk.id] for dd in vm.data if dd.disk and dd.disk.id in g.volumes}
+            return g
+        if status not in ("Pending", "InProgress", "Delayed"):
+            raise Failed(f"the command ended as {out.get('StatusDetails') or status or 'unknown'} on the instance")
+    raise Failed("no answer in time")
 
 
 def unescape_lsblk(text: str) -> str:
@@ -776,6 +1261,9 @@ def parse_guest(text: str) -> Guest:
             lun, _, mounts = rest_of_line.partition(" ")
             if lun.isdigit():
                 g.luns[int(lun)] = [unescape_lsblk(m) for m in mounts.split() if m.startswith("/")]
+        elif tag == "V":
+            volume, _, mounts = rest_of_line.partition(" ")
+            g.volumes[volume] = [unescape_lsblk(m) for m in mounts.split() if m.startswith("/")]
         elif tag == "D":
             parts = rest_of_line.split(" ", 3)
             if len(parts) == 4 and parts[1].isdigit() and parts[2].isdigit():
@@ -793,9 +1281,10 @@ def kernel_version(kernel: str) -> Optional[Tuple[int, int]]:
 def rhel_family(vm: Vm) -> bool:
     g = vm.guest
     if g and g.os_id:
-        return g.os_id in RHEL_FAMILY or "rhel" in g.os_like.split()
+        return g.os_id in RHEL_FAMILY or any(word in RHEL_LIKE for word in g.os_like.split())
     name = vm.os_name.lower()
-    return any(word in name for word in ("rhel", "red hat", "redhat", "centos", "rocky", "alma", "oracle"))
+    return any(word in name for word in ("rhel", "red hat", "redhat", "centos", "rocky", "alma", "oracle",
+                                         "amazon linux"))
 
 
 def os_label(vm: Vm) -> str:
@@ -836,12 +1325,17 @@ def elastic_floor(v2: bool) -> int:
     return ELASTIC_FLOOR_V2_GIB if v2 else ELASTIC_FLOOR_V1_GIB
 
 
+def evacuation_cap(uncached_mbps: int) -> Optional[int]:
+    """The largest disk the VM can empty in the evacuation window, in GiB; None when its throughput is not known."""
+    if uncached_mbps <= 0:
+        return None
+    return math.floor(EVAC_WINDOW_MINUTES * 60.0 * EVAC_SHARE * uncached_mbps / (2.0 * ELASTIC_FILL_FRACTION * 1024.0))
+
+
 def elastic_cap_gib(uncached_mbps: int, floor: int) -> int:
     """The largest elastic disk the VM can empty in the evacuation window."""
-    if uncached_mbps <= 0:
-        return ELASTIC_CAP_GIB
-    evacuable = EVAC_WINDOW_MINUTES * 60.0 * EVAC_SHARE * uncached_mbps / (2.0 * ELASTIC_FILL_FRACTION * 1024.0)
-    return max(floor, min(ELASTIC_CAP_GIB, math.floor(evacuable)))
+    cap = evacuation_cap(uncached_mbps)
+    return ELASTIC_CAP_GIB if cap is None else max(floor, min(ELASTIC_CAP_GIB, cap))
 
 
 def clamp_elastics(count: int) -> int:
@@ -922,18 +1416,68 @@ def member_mbps(demand: float, members: int, iops: int, vm_mbps: int) -> int:
     return mbps
 
 
+def hold_gib(used_bytes: int) -> int:
+    """The size Amoeba holds a new AWS pool at: its data plus btrfs's 3%, at most 90% full (the band's high edge)
+    and below the urgent level (95%), with at least 10 GiB free. One reading has no growth or burst to add."""
+    held = math.ceil(used_bytes * (1 + BTRFS_OVERHEAD))
+    return max(1, math.ceil(max(held / BAND_HIGH, held / URGENT_USED, held + FREE_FLOOR_GIB * GIB) / GIB))
+
+
+def gp3_need(peak: Tuple[float, float, float, float], members: int) -> Tuple[int, int]:
+    """IOPS and MB/s one gp3 volume needs: the peak x 1.3 shared across the pool, at least the write peak x 1.3,
+    at least its baseline, and IOPS enough for its MB/s."""
+    def margin(figure: float) -> int:
+        return math.ceil(DEMAND_FACTOR * figure)
+
+    iops = max(GP3_BASE_IOPS, margin(peak[2]), ceil_div(margin(peak[0]), members))
+    mbps = max(GP3_BASE_MBPS, margin(peak[3]), ceil_div(margin(peak[1]), members))
+    return max(iops, math.ceil(mbps / GP3_MBPS_PER_IOPS)), mbps
+
+
+def gp3_pool(vm: Vm, used_bytes: int, peak: Tuple[float, float, float, float]) -> Optional[Tuple[int, int, int, int]]:
+    """Amoeba's gp3 pool for the instance: (volumes, GiB, IOPS and MB/s of each), or None when its free slots, one
+    kept spare, cannot hold it. Equal volumes, at least 2, each no larger than the instance can empty in the
+    evacuation window unless the slots need them larger. Raises Overloaded when the volumes cannot carry its load."""
+    member_slots = (vm.free_slots or 0) - RESERVED_SLOTS
+    if member_slots < 1:
+        return None
+    target = hold_gib(used_bytes)
+    count = max(MIN_MEMBERS, ceil_div(target, max(evacuation_cap(vm.uncached_mbps) or 0,
+                                                  ceil_div(target, member_slots))))
+    if count > member_slots:
+        return None
+    size = ceil_div(target, count)
+    need_iops, need_mbps = gp3_need(peak, count)
+    top_iops = max(GP3_BASE_IOPS, min(GP3_MAX_IOPS, size * GP3_IOPS_PER_GIB))
+    top_mbps = max(GP3_BASE_MBPS, min(GP3_MAX_MBPS, math.floor(top_iops * GP3_MBPS_PER_IOPS)))
+    if size > GP3_MAX_GIB:
+        raise Failed(f"not estimated: {count} gp3 volumes of {size:,} GB, larger than gp3's {GP3_MAX_GIB:,} GB")
+    if need_iops > top_iops or need_mbps > top_mbps:
+        raise Overloaded(f"not estimated: {count} gp3 volumes of {size:,} GB cannot carry the measured peak x 1.3")
+    iops = min(need_iops, top_iops)
+    if vm.uncached_iops > 0:
+        iops = min(iops, max(GP3_BASE_IOPS, vm.uncached_iops // count))
+    mbps = min(need_mbps, top_mbps)
+    if vm.uncached_mbps > 0:
+        mbps = min(mbps, max(GP3_BASE_MBPS, vm.uncached_mbps // count))
+    return count, size, iops, min(mbps, max(GP3_BASE_MBPS, math.floor(iops * GP3_MBPS_PER_IOPS)))
+
+
 # ---------------------------------------------------------------- assessment
 
 def screen(vm: Vm) -> List[str]:
-    """Reasons Amoeba cannot take the VM, from what Azure reports (before looking inside it)."""
+    """Reasons Amoeba cannot take the VM, from what the cloud reports (before looking inside it)."""
     red = []
     if not vm.linux:
         red.append(f"{vm.os_type or 'Non-Linux'} VM; Amoeba supports Linux")
     if vm.managed_by:
         red.append(f"in a resource group managed by {vm.managed_by}; Amoeba does not take VMs another Azure "
                    "service runs")
-    if vm.slots is not None and vm.slots < MIN_VM_SLOTS:
+    if vm.cloud == "azure" and vm.slots is not None and vm.slots < MIN_VM_SLOTS:
         red.append(f"{vm.size} has {vm.slots} data-disk slots; Amoeba needs {MIN_VM_SLOTS} or more")
+    if vm.nvme is False:
+        red.append(f"{vm.size} is a Xen instance type, whose volumes are not NVMe devices named by volume id; "
+                   "Amoeba needs a Nitro type")
     if vm.linux and rhel_family(vm):
         red.append("RHEL-family Linux; its stock kernel has no btrfs")
     return red
@@ -950,14 +1494,18 @@ def data_mounts(vm: Vm) -> Dict[str, List[int]]:
     return mounts
 
 
-def pooled_peak(pooled: List[DataDisk]) -> Tuple[float, float]:
-    """The measured peak of the disks the pool replaces, summed across them per hour: (IOPS, MB/s)."""
-    hours: Dict[str, Tuple[float, float]] = {}
+def pooled_peak(pooled: List[DataDisk]) -> Tuple[float, float, float, float]:
+    """The measured peak of the disks the pool replaces, summed across them per hour: (IOPS, MB/s, write IOPS,
+    write MB/s)."""
+    hours: Hourly = {}
     for dd in pooled:
-        for stamp, (ops, rate) in dd.disk.hourly.items():
-            total = hours.get(stamp, (0.0, 0.0))
-            hours[stamp] = (total[0] + ops, total[1] + rate)
-    return max(v[0] for v in hours.values()), max(v[1] for v in hours.values()) / 1e6
+        for stamp in dd.disk.hourly:
+            add = dd.disk.hourly[stamp]
+            total = hours.get(stamp, (0.0, 0.0, 0.0, 0.0))
+            hours[stamp] = (total[0] + add[0], total[1] + add[1], total[2] + add[2], total[3] + add[3])
+    mb = MB[pooled[0].disk.cloud]
+    return (max(v[0] for v in hours.values()), max(v[1] for v in hours.values()) / mb,
+            max(v[2] for v in hours.values()), max(v[3] for v in hours.values()) / mb)
 
 
 def pool_cost_v2(region_price: Prices, vm: Vm, members: List[int], peak_iops: float, peak_mbps: float) -> float:
@@ -1001,13 +1549,83 @@ def v1_shortfall(vm: Vm, members: List[int], peak_iops: float, peak_mbps: float)
             f"less than the measured peak x 1.3 ({math.ceil(need_iops):,} IOPS, {math.ceil(need_mbps):,} MB/s)")
 
 
+def azure_pool(vm: Vm, g: Guest, mounts: Dict[str, List[int]], peak: Tuple[float, float, float, float],
+               region_price: Prices) -> Optional[Tuple[int, float]]:
+    """(GB, $/month) of the Premium SSD v2 or Premium SSD pool Amoeba builds on Azure; None when the free slots
+    cannot hold it. Raises Failed (Overloaded when it cannot carry the load) with the reason when it is not
+    estimated."""
+    used = sum(max(1, math.ceil(g.mounts[m][1] / GIB)) for m in mounts)
+    pool = pool_size_gib(used)
+    layout = pool_members(pool, used, vm.slots, len(vm.data), vm.uncached_mbps, vm.pool_v2)
+    if layout is None:
+        return None
+    data_members, small = layout
+    if sum(data_members) < pool:
+        raise Failed(f"{used:,} GB used is more than one pool holds; not estimated")
+    members = data_members + [SMALL_MEMBER_GIB] * small
+    if not vm.pool_v2:
+        short = v1_shortfall(vm, members, peak[0], peak[1])
+        if short:
+            raise Overloaded(short)
+    cost = (pool_cost_v2(region_price, vm, members, peak[0], peak[1]) if vm.pool_v2
+            else pool_cost_v1(region_price, vm, members))
+    return sum(members), cost
+
+
+def aws_pool(vm: Vm, g: Guest, mounts: Dict[str, List[int]], peak: Tuple[float, float, float, float],
+             region_price: Prices) -> Optional[Tuple[int, float]]:
+    """(GB, $/month) of the gp3 pool Amoeba builds on AWS; None when the free slots cannot hold it. Raises Failed
+    (Overloaded when it cannot carry the load) with the reason when it is not estimated."""
+    layout = gp3_pool(vm, sum(g.mounts[m][1] for m in mounts), peak)
+    if layout is None:
+        return None
+    rate = region_price.ebs.get(GP3)
+    if rate is None:
+        raise Failed(f"no gp3 list price in {vm.region}")
+    count, size, iops, mbps = layout
+    return count * size, count * ebs_monthly(rate, size, iops, mbps)
+
+
+def under(vm: Vm, mounts: Dict[str, List[int]]) -> List[DataDisk]:
+    """The VM's data disks under the mounts."""
+    luns = {lun for points in mounts.values() for lun in points}
+    return [dd for dd in vm.data if dd.lun in luns]
+
+
+def measure(vm: Vm, g: Guest, mounts: Dict[str, List[int]]) -> None:
+    """Used GB on the mounts the pool takes, and how full it makes the disks under them."""
+    vm.used_gb = sum(g.mounts[m][1] for m in mounts) / GIB
+    provisioned = sum(dd.size_gb for dd in under(vm, mounts))
+    vm.util = vm.used_gb / provisioned if provisioned else None
+
+
+def plan_pool(vm: Vm, g: Guest, mounts: Dict[str, List[int]],
+              region_price: Prices) -> Tuple[Optional[Tuple[int, float]], Dict[str, List[int]]]:
+    """The pool and the mounts it takes. As Amoeba plans, while the pool cannot carry the load, the most demanding
+    mount (by peak IOPS, then MB/s) stays on its disks; when none is left, the first reason stands."""
+    size = aws_pool if vm.cloud == "aws" else azure_pool
+    kept = dict(mounts)
+    first: Optional[Overloaded] = None
+    while True:
+        try:
+            return size(vm, g, kept, pooled_peak(under(vm, kept)), region_price), kept
+        except Overloaded as e:
+            first = first or e
+            if len(kept) == 1:
+                raise first from None
+            del kept[max(kept, key=lambda m: pooled_peak(under(vm, {m: kept[m]}))[:2])]
+
+
 def assess(vm: Vm, prices: Dict[str, Optional[Prices]]) -> None:
     """Lane, used space and the saving for one VM; every blank figure gets its reason."""
     red, amber, notes = screen(vm), [], []
     g, unread = vm.guest, vm.guest_note
+    aws_vm = vm.cloud == "aws"
     if g and not g.luns:
         g = None
-        unread = vm.guest_note = "the VM shows no /dev/disk/azure/scsi1 links to match its data disks"
+        unread = vm.guest_note = ("the instance shows no EBS NVMe links (/dev/disk/by-id) to match its volumes"
+                                  if aws_vm else "the VM shows no /dev/disk/azure/scsi1 links to match its data disks")
+    shared_kind = "Multi-Attach volume" if aws_vm else "shared disk"
     shared = {dd.lun for dd in vm.data if dd.disk and dd.disk.shared}
     on_data = data_mounts(vm) if g else {}
     mounts = {m: luns for m, luns in on_data.items() if not shared & set(luns)}
@@ -1018,7 +1636,7 @@ def assess(vm: Vm, prices: Dict[str, Optional[Prices]]) -> None:
         if version and version < KERNEL_FLOOR:
             amber.append(f"kernel {g.kernel} is below 5.14; upgrade the kernel first (Ubuntu 20.04: the HWE kernel)")
         if not mounts:
-            red.append("its mounted data disks are shared disks, which Amoeba does not pool" if on_data
+            red.append(f"its mounted data disks are {shared_kind}s, which Amoeba does not pool" if on_data
                        else "no mounted data disk found inside the VM")
     if any(dd.disk and dd.disk.ade for dd in vm.data):
         amber.append("Azure Disk Encryption is on; move to server-side encryption first")
@@ -1033,15 +1651,12 @@ def assess(vm: Vm, prices: Dict[str, Optional[Prices]]) -> None:
     pooled_disks = [dd for dd in vm.data if dd.lun in pooled]
     missing = [m for m in mounts if m not in g.mounts] if g else []
     if g and mounts and not missing:
-        used_bytes = sum(g.mounts[m][1] for m in mounts)
-        vm.used_gb = used_bytes / GIB
-        provisioned = sum(dd.size_gb for dd in pooled_disks)
-        vm.util = vm.used_gb / provisioned if provisioned else None
+        measure(vm, g, mounts)
     elif missing:
         notes.append(f"df did not report {missing[0]}")
     if g and mounts:
         if shared:
-            notes.append(f"{len(shared)} shared disk(s) stay as they are; Amoeba does not pool a shared disk")
+            notes.append(f"{len(shared)} {shared_kind}(s) stay as they are; Amoeba does not pool a {shared_kind}")
         left = len([dd for dd in vm.data if dd.lun not in pooled and dd.lun not in shared])
         if left:
             notes.append(f"{left} data disk(s) without a mounted file system stay as they are")
@@ -1065,29 +1680,19 @@ def assess(vm: Vm, prices: Dict[str, Optional[Prices]]) -> None:
         bad = next(dd.disk for dd in pooled_disks if dd.disk.hourly is None)
         return finish(lane, f"IOPS not measured: {bad.metric_note or 'no metric data'}")
 
-    used = sum(max(1, math.ceil(g.mounts[m][1] / GIB)) for m in mounts)
-    pool = pool_size_gib(used)
-    layout = pool_members(pool, used, vm.slots, len(vm.data), vm.uncached_mbps, vm.pool_v2)
-    if layout is None:
-        amber.append("not enough free data-disk slots to build the pool beside today's disks")
-        return finish("Needs work")
-    data_members, small = layout
-    if sum(data_members) < pool:
-        return finish(lane, f"{used:,} GB used is more than one pool holds; not estimated")
-    members = data_members + [SMALL_MEMBER_GIB] * small
-    peak_iops, peak_mbps = pooled_peak(pooled_disks)
-    if not vm.pool_v2:
-        short = v1_shortfall(vm, members, peak_iops, peak_mbps)
-        if short:
-            return finish(lane, short)
-    region_price = prices.get(vm.region) or Prices()
     try:
-        cost = (pool_cost_v2(region_price, vm, members, peak_iops, peak_mbps) if vm.pool_v2
-                else pool_cost_v1(region_price, vm, members))
+        sized, kept = plan_pool(vm, g, mounts, prices.get(vm.region) or Prices())
     except Failed as e:
         return finish(lane, str(e))
-    vm.pool_gb = sum(members)
-    vm.pool_cost = r2(cost)
+    if sized is None:
+        amber.append("not enough free data-disk slots to build the pool beside today's disks")
+        return finish("Needs work")
+    if len(kept) < len(mounts):
+        measure(vm, g, kept)
+        pooled_disks = under(vm, kept)
+        notes += [f"{m} stays on its {'volumes' if aws_vm else 'disks'}, as Amoeba leaves a mount whose load the "
+                  "pool cannot carry" for m in mounts if m not in kept]
+    vm.pool_gb, vm.pool_cost = sized[0], r2(sized[1])
     today = r2(sum(dd.disk.price for dd in pooled_disks))
     if today - vm.pool_cost <= 0:
         vm.no_saving = True
@@ -1142,20 +1747,34 @@ VM_COLS = [("Subscription", "text"), ("Resource group", "text"), ("VM", "text"),
            ("Data-disk slots", "int"), ("Data disks", "int"), ("Provisioned GB", "int"), ("Used GB", "int"),
            ("Mounted-disk utilization %", "pct"), ("Current $/mo", "usd"), ("Pool disks", "text"),
            ("Pool GB", "int"), ("Pool $/mo", "usd"), ("Saving $/mo", "usd"), ("Lane", "text"), ("Reason", "text")]
-DISK_COLS = [("VM", "text"), ("Resource group", "text"), ("Disk", "text"), ("LUN", "int"), ("Disk type", "text"),
-             ("Tier", "text"), ("GB", "int"), ("Provisioned IOPS", "int"), ("Provisioned MB/s", "int"),
-             ("Peak IOPS (14 days)", "int"), ("Peak MB/s (14 days)", "int"), ("Mount", "text"), ("Used GB", "int"),
-             ("$/mo", "usd"), ("Note", "text")]
+DISK_COLS = [("VM", "text"), ("Resource group", "text"), ("Disk", "text"), ("LUN", "int"), ("Device", "text"),
+             ("Disk type", "text"), ("Tier", "text"), ("GB", "int"), ("Provisioned IOPS", "int"),
+             ("Provisioned MB/s", "int"), ("Peak IOPS (14 days)", "int"), ("Peak MB/s (14 days)", "int"),
+             ("Mount", "text"), ("Used GB", "int"), ("$/mo", "usd"), ("Note", "text")]
 UNATTACHED_COLS = [("Subscription", "text"), ("Resource group", "text"), ("Disk", "text"), ("Region", "text"),
                    ("Disk type", "text"), ("Tier", "text"), ("GB", "int"), ("$/mo", "usd"),
                    ("Days since detached", "int"), ("Note", "text")]
+# Columns only one cloud fills. A run without that cloud leaves them out.
+AZURE_COLS = {"Resource group", "LUN", "Tier", "Days since detached"}
+AWS_COLS = {"Device"}
+
+
+def fit(columns: list, rows: list, total: Optional[list], clouds: List[str]) -> Tuple[list, list, Optional[list]]:
+    """The columns that apply to the clouds in the run, each row trimmed to them; the scope column named for them."""
+    drop = (set() if "azure" in clouds else AZURE_COLS) | (set() if "aws" in clouds else AWS_COLS)
+    keep = [i for i, (name, _) in enumerate(columns) if name not in drop]
+    scope = {("azure",): "Subscription", ("aws",): "Account"}.get(tuple(clouds), "Subscription or account")
+    cols = [(scope if columns[i][0] == "Subscription" else columns[i][0], columns[i][1]) for i in keep]
+    return cols, [[r[i] for i in keep] for r in rows], [total[i] for i in keep] if total else None
 
 
 def pool_disks(vm: Vm) -> str:
     """The disk type the VM's pool would use; blank where Amoeba cannot take the VM or it is not known."""
-    if not vm.linux or vm.lane in ("", "Not supported") or vm.pool_v2 is None:
+    if not vm.linux or vm.lane in ("", "Not supported"):
         return ""
-    return POOL_V2 if vm.pool_v2 else POOL_V1
+    if vm.cloud == "aws":
+        return GP3
+    return "" if vm.pool_v2 is None else POOL_V2 if vm.pool_v2 else POOL_V1
 
 
 def vm_rows(vms: List[Vm], names: Dict[str, str]) -> Tuple[list, list]:
@@ -1191,7 +1810,7 @@ def disk_rows(vms: List[Vm]) -> list:
             on_disk = sorted(m for m, luns in mounts.items() if dd.lun in luns)
             used, notes = None, [d.price_note] if d.price_note else []
             if d.shared:
-                notes.append("shared disk; not pooled")
+                notes.append(("Multi-Attach volume" if d.cloud == "aws" else "shared disk") + "; not pooled")
             if on_disk and v.guest and all(m in v.guest.mounts for m in on_disk):
                 if all(len(mounts[m]) == 1 for m in on_disk):
                     used = gb(sum(v.guest.mounts[m][1] for m in on_disk) / GIB)
@@ -1200,20 +1819,22 @@ def disk_rows(vms: List[Vm]) -> list:
             peak_iops, peak_mbps = d.peak()
             if d.hourly is None:
                 notes.append(d.metric_note)
-            rows.append([v.name, v.resource_group, d.name, dd.lun, d.kind, d.price_tier, d.size_gb, d.iops, d.mbps,
-                         gb(peak_iops), gb(peak_mbps), ", ".join(on_disk), used, d.price,
-                         "; ".join(n for n in notes if n)])
+            rows.append([v.name, v.resource_group, d.name, dd.lun if v.cloud == "azure" else None, dd.device, d.kind,
+                         d.price_tier, d.size_gb, d.iops, d.mbps, gb(peak_iops), gb(peak_mbps), ", ".join(on_disk),
+                         used, d.price, "; ".join(n for n in notes if n)])
     return rows
 
 
-def unattached_rows(disks: List[Disk], names: Dict[str, str], now: datetime) -> Tuple[list, list]:
+def unattached_rows(disks: List[Disk], names: Dict[str, str], now: datetime, clouds: List[str]) -> Tuple[list, list]:
     rows = []
     for d in sorted((d for d in disks if d.state.lower() == "unattached"), key=lambda d: (-(d.price or 0), d.name)):
         detached, created, note = parse_time(d.detached), parse_time(d.created), d.price_note
         days = (now - detached).days if detached else None
         if days is None:
-            note = "; ".join(x for x in (note, "Azure did not record when it was detached"
-                                         + (f"; created {created:%Y-%m-%d}" if created else "")) if x)
+            why = "" if "azure" not in clouds else ("AWS does not record when a volume was detached" if d.cloud == "aws"
+                                                    else "Azure did not record when it was detached")
+            when = f"created {created:%Y-%m-%d}" if created else ""
+            note = "; ".join(x for x in (note, why, when) if x)
         rows.append([names.get(d.subscription, d.subscription), d.resource_group, d.name, d.region, d.kind,
                      d.price_tier, d.size_gb, d.price, days, note])
     known = [r[7] for r in rows if r[7] is not None]
@@ -1242,14 +1863,23 @@ def summary_rows(run: dict, vms: List[Vm], disks: List[Disk]) -> Tuple[list, set
     savings = [v for v in with_data if v.saving]
     total_saving = r2(sum(v.saving for v in savings)) if savings else None
     unestimated = [v for v in linux if v.saving is None and not v.no_saving and v.lane != "Not supported"]
-    scanned = [s for s in run["scanned"] if not s.note]
 
     section("Run")
-    item("Directory (tenant)", run["directory"])
-    item("Subscriptions scanned", len(scanned), "int")
-    item("Subscriptions with VMs or disks", ", ".join(s.name for s in scanned if s.vms or s.disks) or "none")
-    for s in [s for s in run["scanned"] if s.note] + run["skipped"]:
-        item(f"Not scanned: {s.name} ({s.id})", s.note)
+    for scan in run["scans"]:
+        scanned = [s for s in scan.scopes if not s.note]
+        noted = [s for s in scan.scopes if s.note] + scan.skipped
+        if scan.cloud == "azure":
+            item("Directory (tenant)", scan.label)
+            item("Subscriptions scanned", len(scanned), "int")
+            item("Subscriptions with VMs or disks", ", ".join(s.name for s in scanned if s.vms or s.disks) or "none")
+            for s in noted:
+                item(f"Not scanned: {s.name} ({s.id})", s.note)
+        else:
+            item("AWS account", scan.label)
+            item("Regions scanned", len(scanned), "int")
+            item("Regions with VMs or disks", ", ".join(s.name for s in scanned if s.vms or s.disks) or "none")
+            for note, names in grouped(noted).items():
+                item(f"Not scanned: {', '.join(names)}", note)
     item("Run on", run["when"])
     item("Script version", VERSION)
 
@@ -1301,81 +1931,172 @@ def summary_rows(run: dict, vms: List[Vm], disks: List[Disk]) -> Tuple[list, set
     return rows, bold
 
 
-def about_rows(ran_in: int, guest_answer: str) -> list:
-    reads = ("Azure Resource Graph (VMs, disks and resource groups), Azure Compute (VM size limits), Azure Monitor "
-             "(disk metrics) and the public price list")
-    rows = [
-        ("What this is", "An estimate, not a quote. The figures come from your Azure and from public list prices "
-                         "at the time of the run."),
-        ("The saving", "For each Linux VM: used space is read inside the VM (df). Zoorik Amoeba moves the "
-                       "VM's data mounts onto one btrfs pool sized to the data: pool size "
-                       f"= used + 20% (at least {HEADROOM_MIN_GIB} GB), rounded up, laid out as Amoeba plans "
-                       "it (2 anchor disks and 3 to 6 equal elastic disks; on VMs with few free data-disk slots, "
-                       "1 anchor and up to 3 elastics). A Premium SSD v2 pool adds one 8 GB disk. In a Premium SSD "
-                       f"pool every disk is a Premium SSD size and elastics are at least {ELASTIC_FLOOR_V1_GIB} GB. "
-                       "Saving = today's list price of the disks the pool replaces - the pool's list price. After "
-                       "the move, autopilot keeps the pool 75-85% full as the data grows and shrinks."),
-        ("Pool disks", "Premium SSD v2 wherever the VM's region and zone offer it (as Azure lists it for your "
-                       "subscription; a VM without a zone also needs a region where Microsoft supports nonzonal "
-                       "Premium SSD v2), otherwise Premium SSD. Pool disks are locally redundant (LRS)."),
-        ("Performance", "Measured peak = the highest hourly figure of the last 14 days in Azure Monitor, where each "
-                        "hour's figure is its busiest minute (Maximum) of Composite Disk Read/Write Operations/sec "
-                        "and Bytes/sec, reads and writes added and summed over the disks the pool replaces. Each "
-                        "Premium SSD v2 disk includes 3,000 IOPS and 125 MB/s; more is priced in only when the "
-                        "measured peak x 1.3, shared across the pool's disks, needs it, and never more than the VM "
-                        "can drive. A Premium SSD disk has the fixed IOPS and MB/s of its size (bursting not "
-                        "counted); a VM whose Premium SSD pool cannot carry the measured peak x 1.3 is not "
-                        "estimated."),
-        ("Prices", "Public Azure Retail Prices API (prices.azure.com): pay-as-you-go list prices in USD for each "
-                   f"disk's region, read at run time. A month is {HOURS_PER_MONTH} hours. Premium SSD, Standard SSD "
-                   "and Standard HDD are priced by tier (a Premium SSD set to a higher performance tier at that "
-                   "tier); Premium SSD v2 and Ultra Disk by provisioned GB, IOPS and MB/s."),
-        ("Not included", "Negotiated discounts, reservations, savings plans and credits; transaction charges, "
-                         "bursting and snapshots; OS disks; unmanaged (VHD) disks; scale-set (uniform) instances; "
-                         "subscriptions in other Azure directories."),
-        ("Lanes", "Ready: Amoeba can take the VM as it is. Needs work: a fix first (kernel 5.14 or later, "
-                  "Azure Disk Encryption, free data-disk slots). Not supported: Windows; VMs in a resource group "
-                  "another Azure service manages (such as Azure Databricks or an AKS node resource group); VM sizes "
-                  f"with fewer than {MIN_VM_SLOTS} data-disk slots; RHEL-family Linux; no btrfs in the kernel; no "
-                  "mounted data disk other than shared disks, which stay as they are. Not checked: disk usage was "
-                  "not read."),
-        ("Used space", "Used GB is the space used on the data-disk mounts the pool would take, from df inside the "
-                       "VM. Mounted-disk utilization % = Used GB / the size of the data disks under those mounts; "
-                       "Provisioned GB counts every data disk."),
-        ("Blank cells", "A blank figure could not be known; the Reason or Note column says why."),
-        ("Units", "GB means GiB (2^30 bytes), the unit Azure sizes disks in. MB/s means 10^6 bytes per second."),
-    ]
-    if ran_in:
-        rows.append(("What ran", f"Read calls: {reads}; plus Azure Run Command in {ran_in} VM(s), described under "
-                                 "Inside the VMs. Nothing else in your Azure was changed, and nothing was sent "
-                                 "anywhere."))
-        rows.append(("Inside the VMs", "With your yes, this command, which only reads, ran in each of those VMs "
-                                       "through Azure Run Command (RunShellScript). On its side, Azure added its Run "
-                                       "Command extension (RunCommandLinux) to VMs that did not have it, kept a copy "
-                                       "of the command and its output under /var/lib/waagent on each VM, and logged "
-                                       "each run in the activity log.\n" + GUEST_SCRIPT))
+def grouped(scopes: List[Subscription]) -> Dict[str, List[str]]:
+    """Scopes by the reason they were not scanned: one line for every region an account policy refuses."""
+    out: Dict[str, List[str]] = {}
+    for s in scopes:
+        out.setdefault(s.note, []).append(s.name)
+    return out
+
+
+BAND_TEXT = (f"After the move, Amoeba keeps the pool {BAND_LOW * 100:.0f}-{BAND_HIGH:.0%} full as the data grows "
+             "and shrinks.")
+
+
+def azure_about() -> Dict[str, str]:
+    return {
+        "The saving": "For each Linux VM: used space is read inside the VM (df). Zoorik Amoeba moves the "
+                      "VM's data mounts onto one btrfs pool sized to the data: pool size "
+                      f"= used + 20% (at least {HEADROOM_MIN_GIB} GB), rounded up, laid out as Amoeba plans "
+                      "it (2 anchor disks and 3 to 6 equal elastic disks; on VMs with few free data-disk slots, "
+                      "1 anchor and up to 3 elastics). A Premium SSD v2 pool adds one 8 GB disk. In a Premium SSD "
+                      f"pool every disk is a Premium SSD size and elastics are at least {ELASTIC_FLOOR_V1_GIB} GB. "
+                      "Saving = today's list price of the disks the pool replaces - the pool's list price. "
+                      + BAND_TEXT,
+        "Pool disks": "Premium SSD v2 wherever the VM's region and zone offer it (as Azure lists it for your "
+                      "subscription; a VM without a zone also needs a region where Microsoft supports nonzonal "
+                      "Premium SSD v2), otherwise Premium SSD. Pool disks are locally redundant (LRS).",
+        "Performance": "Measured peak = the highest hourly figure of the last 14 days in Azure Monitor, where each "
+                       "hour's figure is its busiest minute (Maximum) of Composite Disk Read/Write Operations/sec "
+                       "and Bytes/sec, reads and writes added and summed over the disks the pool replaces. Each "
+                       "Premium SSD v2 disk includes 3,000 IOPS and 125 MB/s; more is priced in only when the "
+                       "measured peak x 1.3, shared across the pool's disks, needs it, and never more than the VM "
+                       "can drive. A Premium SSD disk has the fixed IOPS and MB/s of its size (bursting not "
+                       "counted). Where a Premium SSD pool cannot carry the measured peak x 1.3, the mount with the "
+                       "highest peak IOPS (then MB/s) stays on its disks, as Amoeba leaves it, and the pool is "
+                       "sized again for the others. If no mount is left, the VM is not estimated.",
+        "Prices": "Public Azure Retail Prices API (prices.azure.com): pay-as-you-go list prices in USD for each "
+                  f"disk's region, read at run time. A month is {HOURS_PER_MONTH} hours. Premium SSD, Standard SSD "
+                  "and Standard HDD are priced by tier (a Premium SSD set to a higher performance tier at that "
+                  "tier); Premium SSD v2 and Ultra Disk by provisioned GB, IOPS and MB/s.",
+        "Not included": "Negotiated discounts, reservations, savings plans and credits; transaction charges, "
+                        "bursting and snapshots; OS disks; unmanaged (VHD) disks; scale-set (uniform) instances; "
+                        "subscriptions in other Azure directories.",
+        "Lanes": "Ready: Amoeba can take the VM as it is. Needs work: a fix first (kernel 5.14 or later, "
+                 "Azure Disk Encryption, free data-disk slots). Not supported: Windows; VMs in a resource group "
+                 "another Azure service manages (such as Azure Databricks or an AKS node resource group); VM sizes "
+                 f"with fewer than {MIN_VM_SLOTS} data-disk slots; RHEL-family Linux; no btrfs in the kernel; no "
+                 "mounted data disk other than shared disks, which stay as they are. Not checked: disk usage was "
+                 "not read.",
+        "Units": "GB means GiB (2^30 bytes), the unit Azure sizes disks in. MB/s means 10^6 bytes per second.",
+    }
+
+
+def aws_about() -> Dict[str, str]:
+    return {
+        "The saving": "For each Linux instance: used space is read inside the instance (df). Zoorik Amoeba moves "
+                      "the instance's data mounts onto one btrfs pool of gp3 volumes, laid out as Amoeba plans a new "
+                      "pool on AWS. Pool size = used x 1.03 (btrfs's own space), held at most 90% full and with at "
+                      f"least {FREE_FLOOR_GIB} GB free, rounded up to whole GB; one reading has no growth or burst "
+                      f"to add. The pool is {MIN_MEMBERS} or more equal gp3 volumes, as few as the free volume slots "
+                      "allow (one kept spare), each no larger than the instance can empty in 2 hours when it is 80% "
+                      "full, reading and writing that data at 30% of the instance's EBS throughput, unless the slots "
+                      "need larger ones. Saving = today's list price of the volumes the pool replaces - the pool's "
+                      "list price. " + BAND_TEXT,
+        "Pool disks": "gp3, the EBS volume type Amoeba creates, in the instance's Availability Zone.",
+        "Performance": "Measured peak = the highest hourly figure of the last 14 days in CloudWatch (AWS/EBS), where "
+                       "each hour's figure is its busiest minute: the Maximum of the 1-minute VolumeReadOps, "
+                       "VolumeWriteOps, VolumeReadBytes and VolumeWriteBytes, divided by 60, reads and writes added "
+                       "and summed over the volumes the pool replaces. Amoeba itself plans from its own readings "
+                       "inside the instance; this estimate has CloudWatch's instead, the way the Azure estimate has "
+                       "Azure Monitor's. Each gp3 volume includes 3,000 IOPS and 125 MB/s. As Amoeba sets them, each "
+                       "volume gets the measured peak x 1.3 shared across the pool's volumes, and at least the write "
+                       "peak x 1.3, within what a gp3 volume of its size takes (500 IOPS per GB, up to 80,000; "
+                       "0.25 MB/s per IOPS, up to 2,000) and its share of what the instance can drive. Where the "
+                       "pool's volumes cannot carry that, the mount with the highest peak IOPS (then MB/s) stays on "
+                       "its volumes, as Amoeba leaves it, and the pool is sized again for the others. If no mount "
+                       "is left, the instance is not estimated.",
+        "Prices": "AWS Price List API (aws pricing get-products): on-demand list prices in USD for each volume's "
+                  "region, read at run time. EBS bills by the month: gp3 its GB, the IOPS above 3,000 and the MB/s "
+                  "above 125; io1 and io2 their GB and every provisioned IOPS (io2 in bands); gp2, st1 and sc1 "
+                  "their GB. Magnetic (standard) volumes bill each I/O request and are not priced.",
+        "Not included": "Negotiated discounts and credits; snapshots and I/O request charges; root volumes; "
+                        "instance store; Multi-Attach volumes, which stay as they are; regions not enabled for the "
+                        "account.",
+        "Lanes": "Ready: Amoeba can take the instance as it is. Needs work: a fix first (kernel 5.14 or later, "
+                 "free volume slots). Not supported: Windows; Xen instance types (Amoeba needs a Nitro type, where "
+                 "each EBS volume is an NVMe device named by its volume id); RHEL-family Linux, Amazon Linux "
+                 "included; no btrfs in the kernel; no mounted data volume other than Multi-Attach volumes, which "
+                 "stay as they are. Not checked: disk usage was not read, for example because Systems Manager "
+                 "does not manage the instance.",
+        "Units": "GB means GiB (2^30 bytes), the unit AWS sizes volumes in. MB/s means MiB/s (2^20 bytes per "
+                 "second), the unit gp3 throughput is set in.",
+    }
+
+
+READS = {"azure": "Azure Resource Graph (VMs, disks and resource groups), Azure Compute (VM size limits), Azure "
+                  "Monitor (disk metrics) and the public price list",
+         "aws": "EC2 (instances, volumes and instance types), Systems Manager (which instances it manages), "
+                "CloudWatch (volume metrics) and the AWS Price List API"}
+
+
+def ran_rows(cloud: str, ran_in: int, answer: str) -> List[Tuple[str, str]]:
+    """What ran in one cloud, and inside its VMs."""
+    name = CLOUD_NAMES[cloud]
+    machine, machines = ("VM", "VMs") if cloud == "azure" else ("instance", "instances")
+    inside = f"Inside the {machines}"
+    if not ran_in:
+        return [("What ran", f"Read calls only: {READS[cloud]}. Nothing in your {name} was changed, and nothing "
+                             "was sent anywhere."),
+                (inside, f"Nothing ran inside any {machine} ({answer}).")]
+    if cloud == "azure":
+        tool, how = "Azure Run Command", (
+            "through Azure Run Command (RunShellScript). On its side, Azure added its Run Command extension "
+            "(RunCommandLinux) to VMs that did not have it, kept a copy of the command and its output under "
+            "/var/lib/waagent on each VM, and logged each run in the activity log.")
     else:
-        rows.append(("What ran", f"Read calls only: {reads}. Nothing in your Azure was changed, and nothing was "
-                                 "sent anywhere."))
-        rows.append(("Inside the VMs", f"Nothing ran inside any VM ({guest_answer})."))
+        tool, how = "Systems Manager Run Command", (
+            f"through AWS Systems Manager Run Command ({SSM_DOCUMENT}). On its side, Systems Manager kept the "
+            "command and its output in its Run Command history, its agent kept a copy under /var/lib/amazon/ssm "
+            "on each instance, and CloudTrail logged each call.")
+    return [("What ran", f"Read calls: {READS[cloud]}; plus {tool} in {ran_in} {machine}(s), described under "
+                         f"{inside}. Nothing else in your {name} was changed, and nothing was sent anywhere."),
+            (inside, f"With your yes, this command, which only reads, ran in each of those {machines} {how}\n"
+                     + GUEST_SCRIPT[cloud])]
+
+
+def about_rows(run: dict) -> list:
+    scans = run["scans"]
+    both = len(scans) > 1
+    names = " and ".join(CLOUD_NAMES[s.cloud] for s in scans)
+    rows = [("What this is", f"An estimate, not a quote. The figures come from your {names} and from list prices "
+                             "at the time of the run.")]
+    texts = {s.cloud: azure_about() if s.cloud == "azure" else aws_about() for s in scans}
+    for topic in ("The saving", "Pool disks", "Performance", "Prices", "Not included", "Lanes"):
+        rows += [(f"{topic} ({CLOUD_NAMES[c]})" if both else topic, t[topic]) for c, t in texts.items()]
+    rows += [("Used space", "Used GB is the space used on the data-disk mounts the pool would take, from df inside "
+                            "the VM. Mounted-disk utilization % = Used GB / the size of the data disks under those "
+                            "mounts; Provisioned GB counts every data disk."),
+             ("Blank cells", "A blank figure could not be known; the Reason or Note column says why.")]
+    rows += [(f"Units ({CLOUD_NAMES[c]})" if both else "Units", t["Units"]) for c, t in texts.items()]
+    for s in scans:
+        ran_in = len(RUN_COMMAND_SENT if s.cloud == "aws" else RUN_COMMAND_STARTED["azure"])
+        rows += [(f"{topic} ({CLOUD_NAMES[s.cloud]})" if both else topic, detail)
+                 for topic, detail in ran_rows(s.cloud, ran_in, s.guest_answer)]
     rows.append(("Prepared by", f"Zoorik Amoeba: disk assessment {VERSION}. Run it again: {ONE_LINER}  "
                                 f"Questions: {SEND_TO}"))
     return [list(r) for r in rows]
 
 
 def build_sheets(run: dict, vms: List[Vm], disks: List[Disk]) -> list:
-    names = {s.id: s.name for s in run["scanned"]}
+    clouds = [s.cloud for s in run["scans"]]
+    names: Dict[str, str] = {}
+    for scan in run["scans"]:
+        prefix = f"{CLOUD_NAMES[scan.cloud]}: " if len(clouds) > 1 else ""
+        scoped = {s.id: s.name for s in scan.scopes} if scan.cloud == "azure" else {scan.label: scan.label}
+        names.update({k: prefix + v for k, v in scoped.items()})
     summary, bold = summary_rows(run, vms, disks)
-    vm_list, vm_total = vm_rows(vms, names)
-    loose, loose_total = unattached_rows(disks, names, run["now"])
+    vm_cols, vm_list, vm_total = fit(VM_COLS, *vm_rows(vms, names), clouds)
+    disk_cols, disk_list, _ = fit(DISK_COLS, disk_rows(vms), None, clouds)
+    loose_cols, loose, loose_total = fit(UNATTACHED_COLS, *unattached_rows(disks, names, run["now"], clouds), clouds)
     return [
         Sheet("Summary", [("Item", "text"), ("Value", "text")], summary, bold_rows=bold, widths=[44, 90],
               autofilter=False, preamble=[("Zoorik Amoeba: disk assessment", "title"), ("", "")]),
-        Sheet("VMs", VM_COLS, vm_list, total=vm_total),
-        Sheet("Disks", DISK_COLS, disk_rows(vms)),
-        Sheet("Unattached disks", UNATTACHED_COLS, loose, total=loose_total),
-        Sheet("About", [("Topic", "text"), ("Detail", "text")], about_rows(run["ran_in"], run["guest_answer"]),
-              widths=[18, 120], autofilter=False),
+        Sheet("VMs", vm_cols, vm_list, total=vm_total),
+        Sheet("Disks", disk_cols, disk_list),
+        Sheet("Unattached disks", loose_cols, loose, total=loose_total),
+        Sheet("About", [("Topic", "text"), ("Detail", "text")], about_rows(run), widths=[28, 120],
+              autofilter=False),
     ]
 
 
@@ -1551,34 +2272,50 @@ def write_xlsx(path: str, sheets: list) -> None:
 
 # ---------------------------------------------------------------- main
 
-def in_cloud_shell() -> bool:
-    return bool(os.environ.get("ACC_CLOUD")) or os.environ.get("AZUREPS_HOST_ENVIRONMENT", "").startswith("cloud-shell")
+def cloud_shell() -> str:
+    """'azure' in Azure Cloud Shell, 'aws' in AWS CloudShell, else ''."""
+    if os.environ.get("ACC_CLOUD") or os.environ.get("AZUREPS_HOST_ENVIRONMENT", "").startswith("cloud-shell"):
+        return "azure"
+    return "aws" if os.environ.get("AWS_EXECUTION_ENV", "") == "CloudShell" else ""
 
 
 LISTED_NAMES = 20
 
 
-def prompt_text(candidates: List[Vm], names: Dict[str, str]) -> str:
+def prompt_text(cloud: str, candidates: List[Vm], names: Dict[str, str]) -> str:
     count = len(candidates)
     minutes = max(1, math.ceil(math.ceil(count / WORKERS) * RUN_COMMAND_SECONDS / 60))
-    script = "\n".join("    " + line for line in GUEST_SCRIPT.splitlines())
+    script = "\n".join("    " + line for line in GUEST_SCRIPT[cloud].splitlines())
     groups: Dict[str, List[str]] = {}
     for v in candidates:
-        groups.setdefault(names.get(v.subscription, v.subscription), []).append(v.name)
-    listed, left, rest, rest_subs = [], LISTED_NAMES, 0, 0
-    for sub in sorted(groups):
-        vm_names = sorted(groups[sub])
+        groups.setdefault(v.region if cloud == "aws" else names.get(v.subscription, v.subscription), []).append(v.name)
+    listed, left, rest, rest_groups = [], LISTED_NAMES, 0, 0
+    for group in sorted(groups):
+        vm_names = sorted(groups[group])
         if left <= 0:
-            rest, rest_subs = rest + len(vm_names), rest_subs + 1
+            rest, rest_groups = rest + len(vm_names), rest_groups + 1
             continue
         shown = vm_names[:left]
         left -= len(shown)
         more = len(vm_names) - len(shown)
-        listed.append(f"    {sub}: {', '.join(shown)}" + (f" and {more} more" if more else ""))
+        listed.append(f"    {group}: {', '.join(shown)}" + (f" and {more} more" if more else ""))
     if rest:
-        listed.append(f"    and {rest} more in {rest_subs} other subscription(s)")
+        listed.append(f"    and {rest} more in {rest_groups} other {'region' if cloud == 'aws' else 'subscription'}(s)")
     idle = ("  Cloud Shell closes a session after 20 minutes without a key press. Press Enter every few\n"
-            "  minutes until the report is written.\n\n") if in_cloud_shell() and minutes >= 10 else ""
+            "  minutes until the report is written.\n\n") if cloud_shell() and minutes >= 10 else ""
+    if cloud == "aws":
+        return (f"\nDisk usage\n"
+                f"  {count} running Linux instance(s) have data volumes:\n" + "\n".join(listed) + "\n\n"
+                f"  Their saving needs the used space on those volumes, which only the instance itself can report.\n"
+                f"  With your yes, this command, which only reads, runs in each of them through AWS Systems\n"
+                f"  Manager Run Command ({SSM_DOCUMENT}), {WORKERS} instances at a time (about {minutes} min):\n\n"
+                f"{script}\n\n"
+                f"  On its side, Systems Manager keeps the command and its output in its Run Command history,\n"
+                f"  its agent keeps a copy under /var/lib/amazon/ssm on the instance, and CloudTrail records\n"
+                f"  each call. It needs the permissions {SSM_PERMISSIONS};\n"
+                f"  an instance without them shows no saving, with the reason.\n\n"
+                f"{idle}"
+                f"Read disk usage inside these {count} instance(s) with Systems Manager Run Command? [y/N] ")
     return (f"\nDisk usage\n"
             f"  {count} running Linux VM(s) have data disks:\n" + "\n".join(listed) + "\n\n"
             f"  Their saving needs the used space on those disks, which only the VM itself can report.\n"
@@ -1594,19 +2331,26 @@ def prompt_text(candidates: List[Vm], names: Dict[str, str]) -> str:
             f"Read disk usage inside these {count} VM(s) with Azure Run Command? [y/N] ")
 
 
-def collect_facts(vms: List[Vm], disks: List[Disk]) -> Dict[str, Optional[Prices]]:
-    """VM size limits per subscription and region, and list prices per region, read in parallel."""
-    keys = sorted({(v.subscription, v.region) for v in vms if re.fullmatch(r"[a-z0-9]+", v.region)})
-    regions = sorted({k[1] for k in keys} | {d.region for d in disks if re.fullmatch(r"[a-z0-9]+", d.region)})
-    if not regions:
-        return {}
-    facts = dict(zip(keys, parallel(region_facts, keys, "Reading VM size limits, subscription-regions")))
-    fetched = parallel(region_prices, regions, "Reading list prices, regions")
-    prices = {r: p if isinstance(p, Prices) else None for r, p in zip(regions, fetched)}
+def fetch_prices(func: Callable, regions: List[str], label: str) -> Dict[str, Optional[Prices]]:
+    fetched = parallel(func, regions, label)
     errors = sorted({str(p) for p in fetched if not isinstance(p, Prices)})
     if errors:
         say(f"List prices: {errors[0]}")
-    for v in vms:
+    return {r: p if isinstance(p, Prices) else None for r, p in zip(regions, fetched)}
+
+
+def collect_facts(vms: List[Vm], disks: List[Disk]) -> Dict[str, Optional[Prices]]:
+    """Azure's VM size limits per subscription and region, and list prices per region, read in parallel. AWS's
+    instance limits come with its inventory."""
+    azure_vms = [v for v in vms if v.cloud == "azure"]
+    keys = sorted({(v.subscription, v.region) for v in azure_vms if re.fullmatch(r"[a-z0-9]+", v.region)})
+    regions = sorted({k[1] for k in keys} | {d.region for d in disks
+                                             if d.cloud == "azure" and re.fullmatch(r"[a-z0-9]+", d.region)})
+    facts = dict(zip(keys, parallel(region_facts, keys, "Reading VM size limits, subscription-regions")))
+    prices = fetch_prices(region_prices, regions, "Reading list prices, regions")
+    aws_regions = sorted({d.region for d in disks if d.cloud == "aws" and re.fullmatch(r"[a-z0-9-]+", d.region)})
+    prices.update(fetch_prices(ebs_prices, aws_regions, "Reading AWS list prices, regions"))
+    for v in azure_vms:
         f = facts.get((v.subscription, v.region))
         if isinstance(f, RegionFacts):
             limits = f.sizes.get(v.size.lower())
@@ -1622,6 +2366,10 @@ def collect_facts(vms: List[Vm], disks: List[Disk]) -> Dict[str, Optional[Prices
     return prices
 
 
+def disk_activity(disk: Disk) -> Hourly:
+    return volume_metrics(disk) if disk.cloud == "aws" else disk_metrics(disk)
+
+
 def unused_path(folder: str, stem: str) -> str:
     """A report path in the folder that no earlier report holds, so nothing is overwritten."""
     path, n = os.path.join(folder, stem + ".xlsx"), 1
@@ -1631,43 +2379,78 @@ def unused_path(folder: str, stem: str) -> str:
     return path
 
 
+def sign_in(shell: str) -> Tuple[List[Scan], List[Tuple[str, Failed]]]:
+    """The clouds to assess: the Cloud Shell's own, else each whose CLI is signed in; and why the others are not."""
+    scans: List[Scan] = []
+    problems: List[Tuple[str, Failed]] = []
+    if shell != "aws":
+        try:
+            directory, subs, skipped = signed_in()
+            if not subs:
+                raise Failed("no enabled subscription is visible to this sign-in; run az login")
+            scans.append(Scan("azure", directory, subs, skipped))
+        except Failed as e:
+            problems.append(("Azure", e))
+    if shell != "azure":
+        try:
+            account, regions = aws_signed_in()
+            scans.append(Scan("aws", account, regions))
+        except Failed as e:
+            problems.append(("AWS", e))
+    return scans, problems
+
+
+def read_scopes(scan: Scan) -> Tuple[List[Vm], List[Disk]]:
+    """Read one cloud's inventory and say what each subscription or region held."""
+    if scan.cloud == "azure":
+        say(f"Directory: {scan.label}")
+        for s in scan.skipped:
+            say(f"Not scanned: {s.name} ({s.id}), {s.note}")
+        found = inventory(scan.scopes)
+        label, kinds = "Subscription", ("VMs", "disks")
+    else:
+        say(f"AWS account: {scan.label}")
+        found = aws_inventory(scan.scopes)
+        label, kinds = "Region", ("instances", "volumes")
+    for note, names in grouped([s for s in scan.scopes if s.note]).items():
+        say(f"{label} {', '.join(names)}: not scanned, {note}")
+    for s in scan.scopes:
+        if not s.note and (s.vms or s.disks):
+            say(f"{label} {s.name}: {s.vms} {kinds[0]}, {s.disks} {kinds[1]}")
+    empty = sum(1 for s in scan.scopes if not s.note and not s.vms and not s.disks)
+    if empty:
+        say(f"{empty} {label.lower()}(s) with no {kinds[0]} or {kinds[1]}.")
+    return found
+
+
 def assessment() -> int:
     say(f"Zoorik Amoeba: disk assessment {VERSION}")
-    if os.name == "nt":
-        say("On Windows, run this in Azure Cloud Shell (shell.azure.com) or in WSL.")
+    for started in RUN_COMMAND_STARTED.values():
+        started.clear()
+    RUN_COMMAND_SENT.clear()
+    shell = cloud_shell()
+    scans, problems = sign_in(shell)
+    signed_out = [(name, e) for name, e in problems if "is not installed" not in str(e)]
+    if not scans:
+        if not signed_out:
+            say("This needs the Azure CLI (az) or the AWS CLI (aws), signed in. Open Azure Cloud Shell "
+                "(shell.azure.com) or AWS CloudShell and run it there.")
+        for name, e in signed_out:
+            say(f"{name}: {e}, then run this again.")
         return 1
-    RUN_COMMAND_STARTED.clear()
-    try:
-        directory, subs, skipped = signed_in()
-    except Failed as e:
-        if "not installed" in str(e):
-            say("This needs the Azure CLI (az). Open Azure Cloud Shell (shell.azure.com) and paste the line there.")
-        else:
-            say(f"Azure: {e}, then paste the line again.")
-        return 1
-    if not subs:
-        say("No enabled Azure subscription is visible to this sign-in. Run az login, then paste the line again.")
-        return 1
-    say(f"Directory: {directory}")
-    for s in skipped:
-        say(f"Not scanned: {s.name} ({s.id}), {s.note}")
-    vms, disks = inventory(subs)
-    empty = 0
-    for s in subs:
-        if s.note:
-            say(f"Subscription {s.name}: not scanned, {s.note}")
-        elif s.vms or s.disks:
-            say(f"Subscription {s.name}: {s.vms} VMs, {s.disks} disks")
-        else:
-            empty += 1
-    if empty:
-        say(f"{empty} subscription(s) with no VMs or disks.")
+    for name, e in signed_out:
+        say(f"{name}: not assessed, {e}")
+    vms: List[Vm] = []
+    disks: List[Disk] = []
+    for scan in scans:
+        found = read_scopes(scan)
+        vms += found[0]
+        disks += found[1]
     if not vms and not disks:
-        if all(s.note for s in subs):
-            say("No subscription could be read, so there is nothing to report. Fix the reason above, "
-                "then paste the line again.")
+        if all(s.note for scan in scans for s in scan.scopes):
+            say("Nothing could be read, so there is nothing to report. Fix the reason above, then run this again.")
             return 1
-        say("No VMs or managed disks in the subscriptions scanned, so there is nothing to report.")
+        say("No VMs or disks in what was scanned, so there is nothing to report.")
         return 0
     prices = collect_facts(vms, disks)
 
@@ -1678,46 +2461,54 @@ def assessment() -> int:
         if not v.running:
             v.guest_note = "VM is not running"
         elif not any(dd.disk for dd in v.data):
-            v.guest_note = "no managed data disk"
+            v.guest_note = "no managed data disk" if v.cloud == "azure" else "data volumes not readable"
+        elif v.channel:
+            v.guest_note = v.channel
         else:
             candidates.append(v)
-    answer, guest_answer = None, "no running Linux VM with data disks to read"
-    if candidates:
-        answer = ask(prompt_text(candidates, {s.id: s.name for s in subs}))
+    names = {s.id: s.name for scan in scans for s in scan.scopes}
+    for scan in scans:
+        group = [v for v in candidates if v.cloud == scan.cloud]
+        if not group:
+            continue
+        answer = ask(prompt_text(scan.cloud, group, names))
         if answer is None:
-            say("\nNo terminal to ask on, so disk usage inside VMs is not read.")
-        guest_answer = {True: "", False: "declined at the prompt", None: "no terminal to ask on"}[answer]
-    if answer:
-        for v, result in zip(candidates, parallel(read_guest, candidates, "Reading disk usage, VMs")):
-            if isinstance(result, Guest):
-                v.guest = result
-            else:
-                v.guest_note = str(result)
-    else:
-        for v in candidates:
-            v.guest_note = guest_answer
+            say(f"\nNo terminal to ask on, so disk usage inside {CLOUD_NAMES[scan.cloud]} VMs is not read.")
+        scan.guest_answer = {True: "", False: "declined at the prompt", None: "no terminal to ask on"}[answer]
+        if answer:
+            read = read_guest if scan.cloud == "azure" else read_instance
+            for v, result in zip(group, parallel(read, group, "Reading disk usage, VMs")):
+                if isinstance(result, Guest):
+                    v.guest = result
+                else:
+                    v.guest_note = str(result)
+        else:
+            for v in group:
+                v.guest_note = scan.guest_answer
 
-    measured = [dd.disk for v in vms if v.linux for dd in v.data if dd.disk]
-    for d, result in zip(measured, parallel(disk_metrics, measured, f"Reading {METRIC_DAYS} days of disk metrics")):
+    measured = []
+    for v in vms:
+        for dd in v.data:
+            if dd.disk and not v.linux:
+                dd.disk.metric_note = "not measured (Windows VM)"
+            elif dd.disk and v.nvme is False:
+                dd.disk.metric_note = "not measured (Xen instance type)"
+            elif dd.disk:
+                measured.append(dd.disk)
+    for d, result in zip(measured, parallel(disk_activity, measured, f"Reading {METRIC_DAYS} days of disk metrics")):
         if isinstance(result, dict) and result:
             d.hourly = result
         else:
             d.metric_note = f"metrics not readable: {result}" if isinstance(result, Failed) else \
                 f"no metric data in the last {METRIC_DAYS} days"
     for v in vms:
-        if not v.linux:
-            for dd in v.data:
-                if dd.disk:
-                    dd.disk.metric_note = "not measured (Windows VM)"
         try:
             assess(v, prices)
         except Exception as e:  # one VM with unexpected data must not stop the report
             v.lane, v.reasons = "", [f"not assessed: unexpected data ({type(e).__name__})"]
 
     now = datetime.now(timezone.utc)
-    run = {"directory": directory, "scanned": subs, "skipped": skipped, "now": now,
-           "when": now.strftime("%Y-%m-%d %H:%M UTC"), "ran_in": len(RUN_COMMAND_STARTED),
-           "guest_answer": guest_answer}
+    run = {"scans": scans, "now": now, "when": now.strftime("%Y-%m-%d %H:%M UTC")}
     sheets = build_sheets(run, vms, disks)
     stem = f"zoorik-disk-assessment-{now:%Y%m%d-%H%M}"
     path = ""
@@ -1753,25 +2544,50 @@ def assessment() -> int:
         + (f" ({len(loose) - len(loose_spend)} not priced)" if len(loose) > len(loose_spend) else ""))
     say()
     say(f"Report: {path}")
-    if in_cloud_shell():
+    if shell == "azure":
         say(f"Download it: Cloud Shell toolbar > Manage files > Download, then enter {path}")
+    elif shell == "aws":
+        say(f"Download it: Actions > Download file, then enter {path}")
+        say("(Download needs the full CloudShell page; if Actions is missing, open CloudShell in a new tab.)")
     say(f"Please e-mail it to {SEND_TO}")
     return 0
 
 
 def stop_note() -> str:
-    """What the run had changed in Azure when it stopped."""
-    if not RUN_COMMAND_STARTED:
-        return "Nothing in your Azure was changed."
-    return (f"Azure Run Command had already started in {len(RUN_COMMAND_STARTED)} VM(s) (see the activity log); "
-            "nothing else in your Azure was changed.")
+    """What the run had changed in your cloud when it stopped."""
+    started = []
+    if RUN_COMMAND_STARTED["azure"]:
+        started.append(f"Azure Run Command had already started in {len(RUN_COMMAND_STARTED['azure'])} VM(s) "
+                       "(see the activity log)")
+    if RUN_COMMAND_STARTED["aws"]:
+        started.append(f"Systems Manager Run Command had already started in {len(RUN_COMMAND_STARTED['aws'])} "
+                       "instance(s) (see its Run Command history)")
+    if not started:
+        return "Nothing in your cloud was changed."
+    return "; ".join(started) + "; nothing else in your cloud was changed."
 
 
-def main() -> int:
+def main(argv: Optional[List[str]] = None) -> int:
+    global ARG_DIR
+    args = sys.argv[1:] if argv is None else list(argv)
+    if args in (["-h"], ["--help"]):
+        print(__doc__)
+        return 0
+    if args == ["--version"]:
+        print(f"Zoorik Amoeba: disk assessment {VERSION}")
+        return 0
+    if args:
+        sys.stderr.write(f"This assessment has no options yet. Run it on its own: {ONE_LINER}\n")
+        return 2
+    sys.stdout.reconfigure(errors="replace")
+    if os.name == "nt":
+        ARG_DIR = tempfile.mkdtemp(prefix="zoorik-disks-")
     try:
         return assessment()
     except KeyboardInterrupt:
         say(f"\nStopped. {stop_note()}")
+        if ARG_DIR:
+            shutil.rmtree(ARG_DIR, ignore_errors=True)
         os._exit(130)  # leave at once: never wait for calls still in flight
     except Failed as e:
         say(f"\nStopped: {e}. {stop_note()}")
@@ -1780,6 +2596,9 @@ def main() -> int:
         say(f"\nStopped by an unexpected error ({type(e).__name__}). {stop_note()} "
             f"Please send this line to {SEND_TO}.")
         return 1
+    finally:
+        if ARG_DIR:
+            shutil.rmtree(ARG_DIR, ignore_errors=True)
 
 
 if __name__ == "__main__":

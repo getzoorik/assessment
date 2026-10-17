@@ -7,10 +7,12 @@ npx zoorik assess coral     # Kubernetes: AKS, EKS, or any cluster kubectl can r
 npx zoorik assess amoeba    # block storage: the data disks of your VMs
 ```
 
-No Node.js? `pip install zoorik`, then `zoorik assess coral`. Either way it needs Python 3.8 or later, and Azure Cloud Shell and AWS CloudShell already have everything it calls.
+Or with pip: `pip install zoorik`, then `zoorik assess coral` or `zoorik assess amoeba`. Either way it needs Python 3.8 or later. It runs in your terminal on Linux, macOS or Windows (PowerShell or Command Prompt), or in Azure Cloud Shell or AWS CloudShell, which already have everything it calls.
+
+Where there is no `pip` command (macOS's own Python has only `pip3`), run `python3 -m pip install zoorik`, or on Windows `py -m pip install zoorik`. Where pip stops with `externally-managed-environment` (Homebrew Python, Debian 12, Ubuntu 23.04 and later), run `pipx install zoorik` instead, or use `npx`. Where pip installs it but your shell can't find `zoorik`, run `python3 -m zoorik assess coral` (on Windows, `py -m zoorik assess coral`).
 
 - [Kubernetes: `k8s.py`](#kubernetes-k8spy)
-- [Azure disks: `disks.py`](#azure-disks-diskspy)
+- [Disks: `disks.py`](#disks-diskspy)
 - [Where the figures come from](#where-the-figures-come-from)
 - [Contributing](#contributing)
 
@@ -21,8 +23,11 @@ Each assessment is one Python file in this repo, using only the standard library
 ## Kubernetes: k8s.py
 
 ```bash
+zoorik assess coral
 curl -fsSL https://zoorik.com/assess/k8s | python3 -
 ```
+
+The `curl` line is for bash or zsh: Linux, macOS and both Cloud Shells. On Windows, run `npx zoorik assess coral`, or `zoorik assess coral` after `py -m pip install zoorik`, in PowerShell or Command Prompt.
 
 ### Where to run it
 
@@ -33,7 +38,7 @@ curl -fsSL https://zoorik.com/assess/k8s | python3 -
   - it assesses the EKS clusters if `aws` is signed in;
   - if neither finds a cluster, it assesses the current kubectl context.
 
-  Outside a Cloud Shell it needs `python3`, `kubectl`, and the `az` or `aws` CLI for that cloud.
+  Outside a Cloud Shell, on Linux, macOS or Windows, it needs Python 3.8 or later, `kubectl`, and the `az` or `aws` CLI for that cloud.
 
 A run takes a little over 3 minutes. It reads each cluster, then samples usage for 3 minutes. Each private AKS cluster adds about a minute, and many or large clusters take longer.
 
@@ -86,7 +91,7 @@ Nothing. There is no upload and no telemetry, and you send the file yourself. It
 - **One Excel file,** `zoorik-k8s-assessment-YYYYMMDD-HHMM.xlsx`.
   - In a Cloud Shell it goes in your home folder. Elsewhere it goes in the current directory, or in your home folder if the current directory can't be written. `--out` chooses another place.
   - Its sheets are Summary, Node pools, Nodes, Workloads and Assumptions.
-- **Working files:** kubectl's cache and the temporary kubeconfig. They go in a temporary folder that is deleted when the script exits. Your own kubeconfig is left as it is.
+- **Working files:** kubectl's cache and the temporary kubeconfig, and on Windows any `az` argument that `cmd.exe` would change (`az` is a batch file there). They go in a temporary folder that is deleted when the script exits. Your own kubeconfig is left as it is.
 
 ### Access it needs
 
@@ -118,9 +123,10 @@ When the script can't read a cluster, the run goes on to the next one, and the S
 
 ### Options
 
-Put options after the dash:
+Put options after `zoorik assess coral`, or after the dash of the `curl` line:
 
 ```bash
+npx zoorik assess coral --anonymize
 curl -fsSL https://zoorik.com/assess/k8s | python3 - --anonymize
 ```
 
@@ -193,22 +199,31 @@ They leave out discounts, reservations, savings plans and credits. Nodes whose l
 
 ---
 
-## Azure disks: disks.py
+## Disks: disks.py
 
 ```bash
+zoorik assess amoeba
 curl -fsSL https://zoorik.com/assess/disks | python3 -
 ```
 
+The `curl` line is for bash or zsh: Linux, macOS and both Cloud Shells. On Windows, run `npx zoorik assess amoeba`, or `zoorik assess amoeba` after `py -m pip install zoorik`, in PowerShell or Command Prompt. Piped into Python there, the script could not ask its y/N question.
+
+It assesses the data disks of your Linux VMs on Azure and of your Linux EC2 instances on AWS.
+
 ### Where to run it
 
-Run it in Azure Cloud Shell (Bash), or in a Linux or macOS shell with `python3` and a signed-in `az`. On Windows, use Cloud Shell or WSL.
+- **Azure Cloud Shell (Bash):** it assesses Azure.
+- **AWS CloudShell:** it assesses AWS.
+- **Any other terminal, on Linux, macOS or Windows:** it assesses each cloud whose CLI is signed in: Azure if `az` is, AWS if `aws` is, both if both are. It needs Python 3.8 or later and the `az` or `aws` CLI.
 
-Cloud Shell closes a session after 20 minutes without a key press. On a long run, press Enter every few minutes until the report is written.
+Both Cloud Shells close a session after about 20 minutes without a key press. On a long run, press Enter every few minutes until the report is written.
 
-It assesses every enabled subscription in the Azure directory (tenant) you are signed in to. Subscriptions in other directories are listed as not scanned. To include one, run `az login --tenant <tenant-id>`, then run the line again.
+- **Azure:** it assesses every enabled subscription in the Azure directory (tenant) you are signed in to. Subscriptions in other directories are listed as not scanned. To include one, run `az login --tenant <tenant-id>`, then run it again.
+- **AWS:** it assesses every enabled region of the account you are signed in to. A region the account's policies don't let it read is listed as not scanned, with the reason.
 
 ### What it reads
 
+**Azure:**
 - **Azure Resource Graph:** your VMs and managed disks, and which resource groups another Azure service manages.
 - **Azure Compute:**
   - each VM size's data-disk slots;
@@ -217,33 +232,44 @@ It assesses every enabled subscription in the Azure directory (tenant) you are s
 - **Azure Monitor:** 14 days of IOPS and throughput for each data disk of a Linux VM, as each hour's busiest minute. The metrics are Composite Disk Read/Write Operations/sec and Bytes/sec, with the Maximum aggregation.
 - **prices.azure.com:** the public list prices of managed disks.
 
-### Beyond reads: Azure Run Command, only if you answer y
+**AWS, in each enabled region:**
+- **EC2:** your instances and EBS volumes, and each instance type's EBS limits (volume slots, baseline IOPS and throughput, whether its volumes are NVMe devices).
+- **Systems Manager:** which instances its agent manages, and their Linux distribution.
+- **CloudWatch:** 14 days of IOPS and throughput for each data volume of a Linux instance, as each hour's busiest minute. The metrics are VolumeReadOps, VolumeWriteOps, VolumeReadBytes and VolumeWriteBytes, with the Maximum statistic over AWS's 1-minute data points. These requests count toward CloudWatch's free tier of 1 million API requests a month.
+- **The AWS Price List API:** EBS list prices, through `aws pricing get-products`.
+
+### Beyond reads: one command inside each VM, only if you answer y
 
 The saving needs the used space on each data disk, and only the VM itself can report that.
 
-The script first finds the running Linux VMs that have managed data disks and pass its first checks. If there are any, it lists them by subscription, prints the command below, says how long it will take, and asks once:
+The script first finds the running Linux VMs that have data disks and pass its first checks. If there are any, it lists them, prints the command below, says how long it will take, and asks once for each cloud:
 
 ```
 Read disk usage inside these N VM(s) with Azure Run Command? [y/N]
+Read disk usage inside these N instance(s) with Systems Manager Run Command? [y/N]
 ```
 
-**If you answer y:**
-- The command runs in each of those VMs through Azure Run Command (`RunShellScript`), 8 VMs at a time.
-- It reads:
-  - the kernel version and the Linux distribution;
-  - whether btrfs is available;
-  - which mounts sit on each data disk;
-  - used space, from `df`.
-- On its side, Azure:
-  - adds its Run Command extension (RunCommandLinux) to any VM that doesn't have it yet;
-  - keeps a copy of the command and its output under `/var/lib/waagent` on the VM;
-  - records each run in the activity log.
+**If you answer y**, the command runs in each of those VMs, 8 at a time. It reads:
+- the kernel version and the Linux distribution;
+- whether btrfs is available;
+- which mounts sit on each data disk;
+- used space, from `df`.
+
+**On Azure,** it runs through Azure Run Command (`RunShellScript`). On its side, Azure:
+- adds its Run Command extension (RunCommandLinux) to any VM that doesn't have it yet;
+- keeps a copy of the command and its output under `/var/lib/waagent` on the VM;
+- records each run in the activity log.
+
+**On AWS,** it runs through AWS Systems Manager Run Command (`AWS-RunShellScript`), only in instances Systems Manager manages. On its side:
+- Systems Manager keeps the command and its output in its Run Command history;
+- its agent keeps a copy under `/var/lib/amazon/ssm` on the instance;
+- CloudTrail records each call.
 
 **If you answer anything else, or there is no terminal to ask on:** nothing runs inside any VM. Those VMs show as Not checked, with no saving.
 
-**Ctrl-C** stops the script at once, and no new Run Command starts after it. Run Commands already started finish in Azure, and the script's last line says how many VMs they reached.
+**Ctrl-C** stops the script at once, and no new command starts after it. Commands already started finish in the cloud, and the script's last line says how many VMs they reached.
 
-This is the command:
+This is the command. The two clouds differ only in the fifth line, which finds the data disks:
 
 ```sh
 echo S
@@ -255,14 +281,21 @@ timeout 30 df -P -B1 -T -l | awk '$1 ~ /^\/dev\// && $1 !~ /^\/dev\/loop/ {m=$7;
 echo E
 ```
 
+On AWS the fifth line is:
+
+```sh
+for l in /dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_vol*; do case $l in *-part*) continue;; esac; [ -e "$l" ] || continue; v=${l##*_vol}; echo "V vol-${v%%[-_]*} $(lsblk -nro MOUNTPOINT "$l" | tr '\n' ' ')"; done
+```
+
 Apart from this step, the script only reads, and it writes only the file below.
 
 ### What it sends
 
 Nothing. There is no upload and no telemetry, and you send the file yourself. It switches off the Azure CLI's own usage telemetry for its calls, without changing your az settings. Its only calls go to:
 
-- your Azure APIs;
-- the public Azure price list, which receives a region name for each lookup.
+- your Azure and AWS APIs;
+- the public Azure price list, which receives a region name for each lookup;
+- the AWS Price List API, through `aws`, which receives a region code for each lookup.
 
 ### What it writes
 
@@ -271,12 +304,22 @@ One Excel file, `zoorik-disk-assessment-YYYYMMDD-HHMM.xlsx` (UTC).
 - It goes in the current directory, or in your home folder if the current directory can't be written.
 - It never overwrites an earlier report: a second run in the same minute adds `-2`, `-3` and so on.
 - Its sheets are Summary, VMs, Disks, Unattached disks and About.
-- It names your directory, subscriptions, resource groups, VMs, disks and mount points.
+- It names your directory, subscriptions, resource groups, AWS account, regions, VMs, disks and mount points.
+
+On Windows, `az` is a batch file, and Windows' `cmd.exe` would change some of its arguments (the Resource Graph query, URLs, the command above). Those arguments go through a temporary file that `az` reads, and the script deletes it right after the call, or as it stops if you press Ctrl-C.
 
 ### Access it needs
 
+**Azure:**
 - Reader on the subscriptions.
 - For the Run Command step, `Microsoft.Compute/virtualMachines/runCommand/action`. Virtual Machine Contributor has it. A VM where this permission is missing shows no saving, with the reason.
+
+**AWS:**
+- `ec2:DescribeRegions`, `ec2:DescribeInstances`, `ec2:DescribeVolumes` and `ec2:DescribeInstanceTypes`;
+- `ssm:DescribeInstanceInformation`;
+- `cloudwatch:GetMetricStatistics`;
+- `pricing:GetProducts`;
+- for the Run Command step, `ssm:SendCommand` (on the instances and the `AWS-RunShellScript` document) and `ssm:GetCommandInvocation`. An instance needs the Systems Manager agent, registered with Systems Manager. An instance where either is missing shows no saving, with the reason.
 
 ### Options
 
@@ -284,41 +327,61 @@ None.
 
 ### Download the file and send it
 
-In Azure Cloud Shell, on the toolbar, choose **Manage files > Download**, then enter the path the script prints. Then e-mail the file to **founders@zoorik.com**.
+When the script finishes, it prints the file's full path.
+
+- **Azure Cloud Shell:** on the toolbar, choose **Manage files > Download**, then enter that path.
+- **AWS CloudShell:** choose **Actions > Download file**, then enter that path. This works only from the full CloudShell page. If **Actions** is missing, open CloudShell in a new browser tab.
+
+Then e-mail the file to **founders@zoorik.com**.
 
 ### How the estimate works
 
 The script estimates a saving for each Linux VM whose disk usage was read.
 
-1. **Used space** is the space used on the VM's data-disk mounts. Each mount is rounded up to a whole GB. A shared disk (one attached to several VMs) is never pooled; it stays as it is, and the totals count it once.
-2. **Pool size** = used + 20% of used (at least 50 GB), rounded up.
-3. **Disk type:** the pool goes on Premium SSD v2 where the VM's region and zone offer it, as Azure lists it for your subscription. A VM without a zone also needs a region where Microsoft supports nonzonal Premium SSD v2. Otherwise the pool goes on Premium SSD. Pool disks are locally redundant (LRS). Where today's disks are zone-redundant (ZRS), the VM's Reason says that part of the saving is that difference.
+1. **Used space** is the space used on the data-disk mounts the pool takes. A shared disk (an Azure disk attached to several VMs, or an AWS Multi-Attach volume) is never pooled; it stays as it is, and the totals count it once.
+2. **Pool size:**
+   - **Azure:** used + 20% of used (at least 50 GB), rounded up. Each mount is first rounded up to a whole GB.
+   - **AWS,** as Amoeba sizes a new pool: used × 1.03 (btrfs's own space), held at most 90% full and with at least 10 GB free, rounded up to whole GB. One reading has no growth or burst to add.
+3. **Disk type:**
+   - **Azure:** the pool goes on Premium SSD v2 where the VM's region and zone offer it, as Azure lists it for your subscription. A VM without a zone also needs a region where Microsoft supports nonzonal Premium SSD v2. Otherwise the pool goes on Premium SSD. Pool disks are locally redundant (LRS). Where today's disks are zone-redundant (ZRS), the VM's Reason says that part of the saving is that difference.
+   - **AWS:** the pool goes on gp3, the volume type Amoeba creates.
 4. **Layout, as Amoeba plans it:**
-   - The pool has 3 to 6 equal elastic disks. Pools of 512 GB and over also have 2 anchor disks.
-   - On a VM with few free data-disk slots, the pool has 1 anchor and up to 3 elastics.
-   - The pool is built beside today's disks, so it must fit the free slots, with one slot kept spare.
-   - A Premium SSD v2 pool adds one 8 GB disk.
-   - In a Premium SSD pool, each disk is a Premium SSD size, and elastics are at least 128 GB.
+   - **Azure:**
+     - The pool has 3 to 6 equal elastic disks. Pools of 512 GB and over also have 2 anchor disks.
+     - On a VM with few free data-disk slots, the pool has 1 anchor and up to 3 elastics.
+     - The pool is built beside today's disks, so it must fit the free slots, with one slot kept spare.
+     - A Premium SSD v2 pool adds one 8 GB disk.
+     - In a Premium SSD pool, each disk is a Premium SSD size, and elastics are at least 128 GB.
+   - **AWS:**
+     - The pool is 2 or more equal gp3 volumes, built beside today's volumes in the free volume slots, with one slot kept spare.
+     - It has as few volumes as the slots allow, each no larger than the instance can empty in 2 hours when it is 80% full, reading and writing that data at 30% of the instance's EBS throughput, unless the slots need larger ones.
+     - An instance's volume slots are its type's EBS attachment limit, less the root volume and, where the limit is shared, its network interfaces and NVMe instance-store disks, within the device names `/dev/sdf` to `/dev/sdz`.
 5. **Performance:**
    - The measured peak is the highest hourly figure of the last 14 days. Each hour's figure is its busiest minute (the Maximum), with reads and writes added and summed over the disks the pool replaces.
-   - Each Premium SSD v2 disk includes 3,000 IOPS and 125 MB/s.
-   - More is priced in only when the measured peak × 1.3, shared across the pool's disks, needs it. Even then it is never more than the VM itself can drive.
-   - A Premium SSD pool has the fixed IOPS and MB/s of its disk sizes, without bursting. If those together can't carry the measured peak × 1.3 (or what the VM can drive, if less), the VM is not estimated.
+   - Each Premium SSD v2 disk and each gp3 volume includes 3,000 IOPS and 125 MB/s.
+   - **Azure:** more is priced in only when the measured peak × 1.3, shared across the pool's disks, needs it. Even then it is never more than the VM itself can drive. A Premium SSD pool has the fixed IOPS and MB/s of its disk sizes, without bursting. If those together can't carry the measured peak × 1.3 (or what the VM can drive, if less), the next rule applies.
+   - **AWS,** as Amoeba sets its volumes: each gp3 volume gets the measured peak × 1.3 shared across the pool's volumes, and at least the write peak × 1.3. It stays within what a gp3 volume of its size takes (500 IOPS per GB, up to 80,000; 0.25 MB/s per IOPS, up to 2,000) and within its share of what the instance can drive. Amoeba itself plans from its own readings inside the instance; the estimate uses CloudWatch's instead. If the volumes can't carry that, the next rule applies.
+   - **Where the pool can't carry the load,** the mount with the highest peak IOPS (then MB/s) stays on its disks, as Amoeba leaves it, and the pool is sized again for the other mounts. The VM's Reason names that mount, and its disks count on neither side of the saving. If no mount is left, the VM is not estimated.
    - Without metrics for the disks the pool replaces, the VM is not estimated.
 6. **Saving per month** = today's list price of the disks the pool replaces − the pool's list price. Where the pool costs no less, the VM shows No saving.
 
 **Prices:**
-- **Source:** the public Azure Retail Prices API, using pay-as-you-go USD list prices for each disk's region, read at run time.
-- **Premium SSD, Standard SSD and Standard HDD:** priced by billed tier. A Premium SSD set to a higher performance tier is priced at that tier.
-- **Premium SSD v2 and Ultra Disk:** priced by provisioned GB, IOPS and MB/s, over a 730-hour month.
+- **Azure:** the public Azure Retail Prices API, using pay-as-you-go USD list prices for each disk's region, read at run time.
+  - **Premium SSD, Standard SSD and Standard HDD:** priced by billed tier. A Premium SSD set to a higher performance tier is priced at that tier.
+  - **Premium SSD v2 and Ultra Disk:** priced by provisioned GB, IOPS and MB/s, over a 730-hour month.
+- **AWS:** the AWS Price List API, using on-demand USD list prices for each volume's region, read at run time. EBS bills by the month:
+  - **gp3:** its GB, the IOPS above 3,000 and the MB/s above 125;
+  - **io1 and io2:** their GB and every provisioned IOPS (io2 in bands);
+  - **gp2, st1 and sc1:** their GB;
+  - **magnetic (standard):** not priced, because it bills each I/O request.
 
 **Not included:**
 - discounts, reservations, savings plans and credits;
-- transaction charges, bursting and snapshots;
-- OS disks;
+- transaction and I/O request charges, bursting and snapshots;
+- OS disks and root volumes; instance store;
 - unmanaged (VHD) disks;
 - scale-set (uniform) instances;
-- subscriptions in other directories.
+- subscriptions in other directories, and AWS regions not enabled for the account.
 
 Data disks without a mounted file system stay as they are. Unattached disks are listed with their cost on their own sheet, outside the Amoeba saving.
 
@@ -328,10 +391,10 @@ Data disks without a mounted file system stay as they are. Unattached disks are 
 |---|---|
 | Ready | Amoeba can take the VM as it is. |
 | Needs work | The VM needs a fix first: a kernel below 5.14, Azure Disk Encryption, or not enough free data-disk slots. |
-| Not supported | Windows; a VM in a resource group another Azure service manages, such as Azure Databricks or an AKS node resource group; fewer than 8 data-disk slots; RHEL-family Linux; no btrfs in the kernel; or no mounted data disk other than shared disks. |
-| Not checked | Disk usage was not read. |
+| Not supported | Windows; RHEL-family Linux, which includes Amazon Linux; no btrfs in the kernel; or no mounted data disk other than shared disks. On Azure also a VM in a resource group another Azure service manages, such as Azure Databricks or an AKS node resource group, or a VM size with fewer than 8 data-disk slots. On AWS also a Xen instance type, because Amoeba needs a Nitro type, where each EBS volume is an NVMe device named by its volume id. |
+| Not checked | Disk usage was not read, for example because you answered no, the VM is not running, or Systems Manager doesn't manage the instance. |
 
-**Units:** GB means GiB (2^30 bytes), the unit Azure sizes disks in. MB/s means 10^6 bytes per second.
+**Units:** GB means GiB (2^30 bytes), the unit both clouds size disks in. On Azure, MB/s means 10^6 bytes per second. On AWS, MB/s means MiB/s (2^20 bytes per second), the unit gp3 throughput is set in.
 
 ---
 

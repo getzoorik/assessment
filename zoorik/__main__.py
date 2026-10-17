@@ -12,7 +12,7 @@ Zoorik's free cloud cost assessment. It estimates how much you can reduce your
 cloud bill and writes a report for you to email to founders@zoorik.com.
 
   coral    Kubernetes: AKS, EKS, or any cluster kubectl can reach
-  amoeba   block storage: the data disks of your VMs
+  amoeba   block storage: the data disks of your Azure VMs and EC2 instances
 
 "zoorik assess coral --help" lists its options. What each one reads, runs and
 writes: https://github.com/getzoorik/assessment
@@ -43,17 +43,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return k8s.main(rest)
     if name == "amoeba":
         from zoorik import disks
-        if rest in (["-h"], ["--help"]):
-            print(disks.__doc__)
-            return 0
-        if rest == ["--version"]:
-            print(f"Zoorik Amoeba: disk assessment {disks.VERSION}")
-            return 0
-        if rest:
-            sys.stderr.write("zoorik assess amoeba has no options yet. Run it on its own: zoorik assess amoeba\n")
-            return 2
         disks.ONE_LINER = "zoorik assess amoeba"
-        return disks.main()
+        return disks.main(rest)
     sys.stderr.write(f"zoorik: no assessment called {name!r}. Try: zoorik assess coral\n\n{USAGE}")
     return 2
 
