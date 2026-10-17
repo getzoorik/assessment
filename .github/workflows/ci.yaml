@@ -10,12 +10,19 @@ permissions:
 
 jobs:
   scripts:
-    name: Scripts on Python ${{ matrix.python }}
-    runs-on: ubuntu-24.04
+    name: Scripts on ${{ matrix.os }}, Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.8", "3.x"]
+        os: [ubuntu-24.04, macos-15, windows-2025]
+        python: ["3.x"]
+        include:
+          - os: ubuntu-24.04
+            python: "3.8"
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -25,14 +32,16 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Compile both scripts
         run: python -m py_compile k8s.py disks.py
-      - name: k8s.py prints its help and version
+      - name: Both scripts print their help and version
         run: |
           python k8s.py --help
           python k8s.py --version
+          python disks.py --help
+          python disks.py --version
       - name: k8s.py writes a report when it can't reach a cluster
         run: |
           python k8s.py --context no-such-context --no-prices --sample-minutes 0 --out "$RUNNER_TEMP/report/"
-          python -c "import glob, zipfile; [f] = glob.glob('$RUNNER_TEMP/report/*.xlsx'); assert zipfile.ZipFile(f).testzip() is None"
+          python -c "import glob, os, zipfile; [f] = glob.glob(os.path.join(os.environ['RUNNER_TEMP'], 'report', '*.xlsx')); assert zipfile.ZipFile(f).testzip() is None"
       - name: The zoorik package installs, and zoorik assess coral writes the same report
         run: |
           python -m pip install .
@@ -41,16 +50,35 @@ jobs:
           zoorik assess amoeba --version
           zoorik k8s --version
           zoorik assess coral --context no-such-context --no-prices --sample-minutes 0 --out "$RUNNER_TEMP/package-report/"
-          python -c "import glob, zipfile; [f] = glob.glob('$RUNNER_TEMP/package-report/*.xlsx'); assert zipfile.ZipFile(f).testzip() is None"
-      - name: disks.py stops with a clear message when az is missing
+          python -c "import glob, os, zipfile; [f] = glob.glob(os.path.join(os.environ['RUNNER_TEMP'], 'package-report', '*.xlsx')); assert zipfile.ZipFile(f).testzip() is None"
+      - name: disks.py stops with a clear message when neither az nor aws is installed
         run: |
           if PATH="$(dirname "$(command -v python)")" python disks.py < /dev/null > disks.out; then exit 1; fi
           cat disks.out
-          grep -q "This needs the Azure CLI" disks.out
+          grep -q "This needs the Azure CLI (az) or the AWS CLI (aws)" disks.out
+      # The Linux and Windows runners have az and aws installed but not signed in. On Windows az is az.cmd, so a
+      # sign-in message (not "not installed") shows that both scripts find it there.
+      - name: Where az and aws are installed but not signed in, both scripts say to sign in
+        if: runner.os != 'macOS'
+        run: |
+          if python disks.py < /dev/null > disks.out; then exit 1; fi
+          cat disks.out
+          grep -q "Azure: not signed in to Azure; run az login" disks.out
+          grep -q "AWS: no AWS credentials" disks.out
+          if python k8s.py --discover azure --no-prices --sample-minutes 0 --out "$RUNNER_TEMP/discover/" > k8s.out; then exit 1; fi
+          cat k8s.out
+          grep -q "Azure: could not list clusters: not signed in to Azure; run az login" k8s.out
 
   npm:
-    name: npx zoorik
-    runs-on: ubuntu-24.04
+    name: npx zoorik on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2025]
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -63,6 +91,11 @@ jobs:
         run: |
           npm pack --dry-run --json | node -e "const f=JSON.parse(require('fs').readFileSync(0))[0].files.map(x=>x.path).sort().join(' '); if (f !== 'LICENSE README.md bin/zoorik.js package.json') { console.error(f); process.exit(1) }"
           node bin/zoorik.js --version | grep -E '^zoorik [0-9]'
+      - name: npx runs the packed launcher
+        working-directory: npm
+        run: |
+          npm pack
+          npx --yes --package "./zoorik-$(node -p "require('./package.json').version").tgz" zoorik --version | grep -E '^zoorik [0-9]'
 
   ruff:
     name: Ruff

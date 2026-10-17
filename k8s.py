@@ -4,14 +4,19 @@
 Reads your AKS and EKS clusters, estimates what right-sizing could save, and
 writes one Excel file for you to e-mail to Zoorik. Nothing to install.
 
-Paste this line in Azure Cloud Shell (every AKS cluster in the current
-subscription), in AWS CloudShell (every EKS cluster in every enabled region),
-or in any other shell, where it uses az or aws if signed in, else the current
-kubectl context:
+Run it in Azure Cloud Shell (every AKS cluster in the current subscription),
+in AWS CloudShell (every EKS cluster in every enabled region), or in any
+other terminal on Linux, macOS or Windows, where it uses az or aws if signed
+in, else the current kubectl context:
+    npx zoorik assess coral
+    zoorik assess coral        (after pip install zoorik)
     curl -fsSL https://zoorik.com/assess/k8s | python3 -
+The curl line is for bash or zsh: Linux, macOS and both Cloud Shells. On
+Windows, use one of the first two, in PowerShell or Command Prompt.
 
-Options go after the dash. --context NAME assesses only that context:
-    curl -fsSL https://zoorik.com/assess/k8s | python3 - --anonymize
+Options go after coral, or after the dash. --context NAME assesses only that
+context:
+    zoorik assess coral --anonymize
     curl -fsSL https://zoorik.com/assess/k8s | python3 - --context prod --sample-minutes 10
 
 The source is at github.com/getzoorik/assessment.
@@ -34,9 +39,9 @@ What it does:
     cloud's own APIs and the public Azure price list (prices.azure.com),
     which receives a region and a machine type.
   - It writes one file, the Excel report. Its working files (kubectl's cache,
-    and a kubeconfig for the clusters it finds through az or aws) go in a
-    temporary folder that is deleted when it exits; your own kubeconfig is
-    never changed.
+    a kubeconfig for the clusters it finds through az or aws and, on Windows,
+    any az argument that cmd.exe would change) go in a temporary folder that
+    is deleted when it exits; your own kubeconfig is never changed.
 """
 
 from __future__ import annotations
@@ -72,7 +77,7 @@ from xml.sax.saxutils import escape
 
 # ---------------------------------------------------------------- config
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 ONE_LINER = "curl -fsSL https://zoorik.com/assess/k8s | python3 -"
 SEND_TO = "founders@zoorik.com"
 
@@ -152,21 +157,47 @@ def reason(text: str) -> str:
     return line[:100]
 
 
+CMD_SPECIAL = re.compile(r'["&|<>^%()\r\n]')
+
+
+def decoded(data: bytes) -> str:
+    """CLI output as text, with Windows line ends made plain: UTF-8, or on Windows the console code page, which az
+    writes in when its output is piped."""
+    try:
+        out = data.decode("utf-8")
+    except UnicodeDecodeError:
+        out = data.decode("mbcs" if os.name == "nt" else "utf-8", "replace")
+    return out.replace("\r\n", "\n")
+
+
+def arg_file(value: str) -> str:
+    """On Windows az is az.cmd, whose arguments cmd.exe reads again, so a value it would change goes in a file
+    that az reads instead (@path). The file is in WORKDIR, deleted at exit."""
+    fd, path = tempfile.mkstemp(dir=WORKDIR)
+    with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+        f.write(value)
+    return "@" + path
+
+
 def run(cmd: list[str], timeout: float = 120, env: Optional[dict] = None) -> str:
-    """Run one command and return its output, or raise Failed.
+    """Run one command and return its output, or raise Failed. The command is found on PATH as the shell finds it,
+    so az.cmd on Windows works too.
     The Azure CLI's own usage telemetry is switched off for these calls only; your az settings stay as they are."""
     if cmd and cmd[0] == "az":
         env = dict(env or os.environ, AZURE_CORE_COLLECT_TELEMETRY="false")
+        if os.name == "nt":
+            cmd = cmd[:1] + [arg_file(a) if CMD_SPECIAL.search(a) else a for a in cmd[1:]]
     try:
-        p = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                           timeout=timeout, env=env, encoding="utf-8", errors="replace")
+        p = subprocess.run([shutil.which(cmd[0]) or cmd[0], *cmd[1:]], stdin=subprocess.DEVNULL,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, env=env)
     except FileNotFoundError:
         raise Failed(f"{cmd[0]} is not installed") from None
     except subprocess.TimeoutExpired:
         raise Failed(f"{cmd[0]} timed out") from None
+    out = decoded(p.stdout)
     if p.returncode != 0:
-        raise Failed(reason(p.stderr or p.stdout))
-    return p.stdout
+        raise Failed(reason(decoded(p.stderr) or out))
+    return out
 
 
 def az(*args: str, timeout: float = 120):
@@ -1786,8 +1817,18 @@ def assess(args: argparse.Namespace) -> int:
     try:
         write_xlsx(path, sheets)
     except OSError as e:
-        say(f"Could not write {path}: {e.strerror}")
-        return 1
+        # A folder can pass the early check and still refuse the file (Windows ACLs, macOS privacy settings).
+        home = os.path.join(os.path.expanduser("~"), os.path.basename(path))
+        written = False
+        if not args.out and home != path:
+            try:
+                write_xlsx(home, sheets)
+                path, written = home, True
+            except OSError:
+                pass
+        if not written:
+            say(f"Could not write {path}: {e.strerror}")
+            return 1
 
     assessed = sum(1 for c in clusters if not c.failed)
     missed = len(clusters) - assessed
@@ -1822,6 +1863,7 @@ def stop(signum, _frame) -> None:
 def main(argv: Optional[list] = None) -> int:
     global WORKDIR
     args = parse_args(argv)
+    sys.stdout.reconfigure(errors="replace")
     for name in ("SIGHUP", "SIGTERM"):
         if hasattr(signal, name):
             signal.signal(getattr(signal, name), stop)

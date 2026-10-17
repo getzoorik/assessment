@@ -5,13 +5,13 @@ build-backend = "hatchling.build"
 [project]
 name = "zoorik"
 dynamic = ["version"]
-description = "Zoorik's free cost assessments for Kubernetes (AKS, EKS) and Azure disks: one Excel file of what you could save."
+description = "Zoorik's free cost assessments for Kubernetes (AKS, EKS) and VM disks (Azure, AWS): one Excel file of what you could save."
 readme = "README.md"
 requires-python = ">=3.8"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{ name = "Zoorik", email = "founders@zoorik.com" }]
-keywords = ["kubernetes", "aks", "eks", "azure", "aws", "cost", "finops", "assessment"]
+keywords = ["kubernetes", "aks", "eks", "azure", "aws", "ebs", "cost", "finops", "assessment"]
 classifiers = [
   "Environment :: Console",
   "Intended Audience :: System Administrators",
