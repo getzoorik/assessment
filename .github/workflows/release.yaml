@@ -23,8 +23,9 @@ jobs:
           TAG: ${{ github.event.release.tag_name }}
         run: |
           version=$(python -c "import zoorik; print(zoorik.__version__)")
-          if [ "$TAG" != "v$version" ]; then
-            echo "::error::Release $TAG does not match the package version $version in zoorik/__init__.py"
+          npm_version=$(python -c "import json; print(json.load(open('npm/package.json'))['version'])")
+          if [ "$TAG" != "v$version" ] || [ "$npm_version" != "$version" ]; then
+            echo "::error::Release $TAG must match zoorik/__init__.py ($version) and npm/package.json ($npm_version)"
             exit 1
           fi
       - name: Build
@@ -33,8 +34,8 @@ jobs:
         run: |
           python -m pip install dist/*.whl
           zoorik --version
-          zoorik k8s --version
-          zoorik disks --version
+          zoorik assess coral --version
+          zoorik assess amoeba --version
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dist
@@ -55,3 +56,28 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+
+  npm:
+    name: Publish to npm
+    needs: publish
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+      - name: Publish, unless this version is already on npm
+        working-directory: npm
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if npm view "zoorik@$version" version >/dev/null 2>&1; then
+            echo "zoorik@$version is already on npm"
+            exit 0
+          fi
+          npx --yes npm@11.21.1 publish --access public
