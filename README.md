@@ -86,8 +86,9 @@ Nothing. There is no upload and no telemetry, and you send the file yourself. It
 
 ### What it writes
 
-- **One Excel file,** `zoorik-k8s-assessment-YYYYMMDD-HHMM.xlsx`.
+- **One Excel file,** `zoorik-k8s-assessment-YYYYMMDD-HHMM.xlsx` (UTC).
   - In a Cloud Shell it goes in your home folder. Elsewhere it goes in the current directory, or in your home folder if the current directory can't be written. `--out` chooses another place.
+  - It never overwrites an earlier report: a second run in the same minute adds `-2`, `-3` and so on. A file name you give with `--out` is written exactly there, as you chose it.
   - Its sheets are Summary, Node pools, Nodes, Workloads and Assumptions.
 - **Working files:** kubectl's cache and the temporary kubeconfig. They go in a temporary folder that is deleted when the script exits. Your own kubeconfig is left as it is.
 
