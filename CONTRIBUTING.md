@@ -105,7 +105,7 @@ python3 k8s.py --context no-such-context --no-prices --sample-minutes 0 --out /t
 
 - The last command reaches no cluster. It shows that a run still finishes, and writes a report, when a cluster can't be assessed.
 - CI also runs disks.py where `az` is missing, and checks that it stops with the message that asks for the Azure CLI.
-- CI also installs the package with `pip install .` and runs the same no-cluster report through `zoorik k8s`.
+- CI also installs the package with `pip install .` and runs the same no-cluster report through `zoorik assess coral`, and checks that `npx zoorik` (the `npm/` folder) runs the PyPI package.
 - `ruff.toml` sets Python 3.8 as the target, so ruff also flags syntax that is newer than 3.8. If you use uv, `uv run --python 3.8 k8s.py --help` tries Python 3.8 locally.
 
 Then run your change for real, against a cluster or subscription you own, and open the report. Excel, LibreOffice and Google Sheets all open it. In the pull request, say what you ran and what changed in the report. Replace your own names, or run k8s.py with `--anonymize`. Never commit a report file: it names things in your account.
@@ -129,9 +129,9 @@ By sending a pull request, you agree that your contribution is licensed under Ap
 
 Maintainers publish the `zoorik` package to PyPI:
 
-1. Bump `__version__` in `zoorik/__init__.py` in a pull request.
+1. Bump `__version__` in `zoorik/__init__.py`, and `version` in `npm/package.json` to the same number, in a pull request.
 2. Once it is merged, publish a GitHub release whose tag is `v` plus that version, such as `v1.0.1`.
-3. The release workflow checks that the tag matches the version, builds the package and installs it once. It publishes to PyPI after a maintainer approves the `pypi` environment. PyPI trusts this workflow directly (trusted publishing), so no PyPI token is stored anywhere.
+3. The release workflow checks that the tag matches the version, builds the package and installs it once. It publishes to PyPI after a maintainer approves the `pypi` environment, then the same version to npm. PyPI trusts this workflow directly (trusted publishing), so no PyPI token is stored anywhere.
 
 ## Security and conduct
 

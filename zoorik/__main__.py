@@ -5,17 +5,17 @@ from typing import List, Optional
 
 from zoorik import __version__
 
-USAGE = """usage: zoorik k8s [options]
-       zoorik disks
+USAGE = """usage: zoorik assess coral [options]
+       zoorik assess amoeba
 
-Zoorik's free cost assessments. Each one writes an Excel file that estimates
-what you could save, for you to e-mail to founders@zoorik.com.
+Zoorik's free cloud cost assessment. It estimates how much you can reduce your
+cloud bill and writes a report for you to email to founders@zoorik.com.
 
-  k8s     Kubernetes: AKS, EKS, or any cluster kubectl can reach (Zoorik Coral)
-  disks   the data disks of your Azure Linux VMs (Zoorik Amoeba)
+  coral    Kubernetes: AKS, EKS, or any cluster kubectl can reach
+  amoeba   block storage: the data disks of your VMs
 
-"zoorik k8s --help" lists its options. What each one reads, runs and writes:
-https://github.com/getzoorik/assessment
+"zoorik assess coral --help" lists its options. What each one reads, runs and
+writes: https://github.com/getzoorik/assessment
 """
 
 
@@ -31,11 +31,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     if name == "--version":
         print(f"zoorik {__version__}")
         return 0
-    if name == "k8s":
+    if name == "assess":
+        if not rest:
+            sys.stderr.write(USAGE)
+            return 2
+        name, rest = rest[0], rest[1:]
+    name = {"k8s": "coral", "disks": "amoeba"}.get(name, name)
+    if name == "coral":
         from zoorik import k8s
-        k8s.ONE_LINER = "zoorik k8s"
+        k8s.ONE_LINER = "zoorik assess coral"
         return k8s.main(rest)
-    if name == "disks":
+    if name == "amoeba":
         from zoorik import disks
         if rest in (["-h"], ["--help"]):
             print(disks.__doc__)
@@ -44,11 +50,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"Zoorik Amoeba: disk assessment {disks.VERSION}")
             return 0
         if rest:
-            sys.stderr.write("zoorik disks has no options yet. Run it on its own: zoorik disks\n")
+            sys.stderr.write("zoorik assess amoeba has no options yet. Run it on its own: zoorik assess amoeba\n")
             return 2
-        disks.ONE_LINER = "zoorik disks"
+        disks.ONE_LINER = "zoorik assess amoeba"
         return disks.main()
-    sys.stderr.write(f"zoorik: no assessment called {name!r}.\n\n{USAGE}")
+    sys.stderr.write(f"zoorik: no assessment called {name!r}. Try: zoorik assess coral\n\n{USAGE}")
     return 2
 
 
