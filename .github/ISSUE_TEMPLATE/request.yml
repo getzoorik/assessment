@@ -32,7 +32,7 @@ body:
     id: request
     attributes:
       label: Describe it
-      description: What should the script read or show, and where in the report? For a missing region or price, name it and paste the Status, Reason, Note or Price note text the report shows today.
+      description: What should the script read or show, and where in the report? For a missing region or price, name it and copy the reason the report shows today.
     validations:
       required: true
   - type: textarea

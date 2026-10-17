@@ -9,7 +9,7 @@ USAGE = """usage: zoorik assess coral [options]
        zoorik assess amoeba
 
 Zoorik's free cloud cost assessment. It estimates how much you can reduce your
-cloud bill and writes a report for you to email to founders@zoorik.com.
+cloud bill and writes a PDF report for you to email to founders@zoorik.com.
 
   coral    Kubernetes: AKS, EKS, or any cluster kubectl can reach
   amoeba   block storage: the data disks of your Azure VMs and EC2 instances

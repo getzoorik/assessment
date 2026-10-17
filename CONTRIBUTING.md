@@ -5,7 +5,7 @@ Thanks for helping. This repo holds two scripts:
 - `k8s.py` assesses Kubernetes clusters (AKS, EKS, or any cluster kubectl can reach);
 - `disks.py` assesses the data disks of Linux VMs on Azure and AWS.
 
-Each one reads a cloud account, estimates a saving and writes one Excel file. The [README](README.md) says exactly what each script reads, runs and writes. Read it first: it is our promise to the people who run them.
+Each one reads a cloud account, estimates a saving and writes one PDF report. The [README](README.md) says exactly what each script reads, runs and writes. Read it first: it is our promise to the people who run them.
 
 ## Before you start
 
@@ -18,11 +18,11 @@ Each one reads a cloud account, estimates a saving and writes one Excel file. Th
 - **One file, standard library only.** Each script is a single Python file that runs as `curl ... | python3 -`. No third-party packages, and a script never imports another file of this repo. It must run on Python 3.8 and later. The `zoorik` package ships the two files unchanged.
 - **Read only.** Apart from the steps the README describes (`az aks command invoke` in k8s.py, and Azure Run Command or AWS Systems Manager Run Command after a yes in disks.py), the scripts only read. Don't add a call that changes anything in a cloud or a cluster.
 - **Send nothing.** No telemetry and no uploads. The only network calls go to the user's cloud, their clusters and the clouds' price lists.
-- **Keep only what the report needs.** k8s.py never reads Secrets or ConfigMaps, and never keeps env values, annotations or pod IPs. When you read something new, keep only the fields you use.
-- **Never guess a figure.** When a value can't be known, leave its cell blank and say why in the Status, Reason, Note or Price note column.
+- **Keep only what the report needs.** Every field a script reads and every figure it works out serves the PDF report or the lines the run prints. k8s.py never reads Secrets or ConfigMaps, and never keeps env values, annotations or pod IPs. When you read something new, keep only the fields you use.
+- **Never guess a figure.** When a value can't be known, never show it as 0: leave it out and let the report give the reason, such as under Not in the saving yet.
 - **Run everywhere.** Both scripts run on Linux, macOS and Windows. Call a CLI through `run` (k8s.py) or `cli` (disks.py), which find `az.cmd` on Windows and pass any argument `cmd.exe` would change through a file. Don't use `/dev/tty`, POSIX-only signals or shell syntax outside those.
-- **Keep the docs in step.** If you change what a script reads, runs, writes or how it estimates, update the README and the sheet that explains the method (Assumptions in k8s.py, About in disks.py) in the same pull request.
-- **Bump `VERSION`** near the top of the script you change, so a report shows which code made it.
+- **Keep the docs in step.** If you change what a script reads, runs, writes or how it estimates, update the README in the same pull request.
+- **Bump `VERSION`** near the top of the script you change, so the first line a run prints shows which code made the report.
 
 ## What you need
 
@@ -55,9 +55,9 @@ Both files are split into sections, each headed by a `# ----` line with its name
 - *discovery:* `choose_targets`, `discover_azure`, `discover_aws` and `kube_contexts` decide which clusters to read, one `Target` each.
 - *collectors:* `collect` reads one cluster, `build` turns what it read into `Node`, `Pod` and `Workload`, and `sample_all` takes the `kubectl top` samples.
 - *pricing:* `Pricer.hourly`, `azure_price` and `aws_price`.
-- *estimate:* `estimate`, `keep_minimums` and `money`.
-- *report rows:* each sheet is a `*_COLS` list and a `*_rows` function, and `assumptions` writes the Assumptions sheet.
-- *xlsx writer:* `write_xlsx` writes the file.
+- *estimate:* `estimate` and `keep_minimums`.
+- *pdf writer:* the layout and the file; see below.
+- *report:* `report` builds the pages from the figures. `figure` rounds each node pool's cost to whole dollars first, so every total is the sum of the figures shown, and `split` shares a cluster's saving across its workloads.
 
 **disks.py**
 - *commands:* `cli` runs every `az` and `aws` call and retries when the cloud throttles; `az`, `aws`, `rest`, `http_json`, `parallel` and `ask`.
@@ -67,9 +67,11 @@ Both files are split into sections, each headed by a `# ----` line with its name
 - *measured performance:* `disk_metrics` (Azure Monitor) and `volume_metrics` (CloudWatch).
 - *inside the VM:* `GUEST_SCRIPT`, `read_guest` (Azure Run Command), `read_instance` (Systems Manager Run Command) and `parse_guest`.
 - *pool sizing:* `pool_members` and the functions above it for Azure, `gp3_pool` for AWS. They use the constants at the top of the file, which are the numbers Amoeba itself plans with. Please open an issue before changing one.
-- *assessment:* `screen` and `assess` set each VM's lane, reasons and saving, the same for both clouds; `azure_pool` and `aws_pool` size and price the pool.
-- *report:* the `*_COLS` lists, the `*_rows` functions, `summary_rows` and `about_rows`. `fit` leaves out the columns no cloud in the run fills.
-- *xlsx writer:* `write_xlsx` writes the file.
+- *assessment:* `screen` and `assess` set each VM's reasons and saving, the same for both clouds; `azure_pool` and `aws_pool` size and price the pool.
+- *report:* `report` builds the pages from the figures. `tally` rounds each VM's cost to whole dollars first, so every total is the sum of the figures shown.
+- *pdf writer:* the layout and the file; see below.
+
+**The pdf writer** is the same block in both files, from `# ---- pdf writer` to `# ---- end of pdf writer`. `Report` lays out the A4 pages: the banner, the cards (`Kpis`, `Card`, `NextSteps`), page breaks and the footer. `Pdf` writes the file in Helvetica, one of the standard PDF fonts, so no font is embedded. A change to the block goes into both files, unchanged.
 
 **zoorik/**, the `zoorik` command for people who install the package:
 - `__main__.py` starts `k8s.py` or `disks.py`. The wheel ships both files inside the package (see `force-include` in `pyproject.toml`), so the package needs no copy of them.
@@ -77,13 +79,12 @@ Both files are split into sections, each headed by a `# ----` line with its name
 
 ## Add a check
 
-- **k8s.py, a new figure or column:** work it out in `build` or `estimate`. Then add the column to the right `*_COLS` list, and the value to its `*_rows` function at the same position.
+- **k8s.py, a new figure:** work it out in `build` or `estimate`, and show it in `report`. Read and keep only what the report shows.
 - **k8s.py, a new Kubernetes resource to read:**
   - add it to `RESOURCES` with a jq filter that keeps only the fields you use (`az aks command invoke` runs that filter inside the cluster);
   - if its objects carry data the report must not keep, such as env values, or are large, add a `slim_*` function to `SLIM`; kubectl reads use it to drop the rest;
-  - add a short label to `OPTIONAL`, so the Status column says when it can't be read;
-  - add it to "What it reads" and to the `kubectl create clusterrole` line in the README, because people grant exactly that role, and to "Data read" in `assumptions`.
-- **disks.py, a new lane rule:** add a reason in `screen` (from what Azure reports) or in `assess` (from what the VM reports). A reason in `red` makes the VM Not supported, and one in `amber` makes it Needs work. Update the Lanes table in the README and the Lanes row in `about_rows`.
+  - add it to "What it reads" and to the `kubectl create clusterrole` line in the README, because people grant exactly that role.
+- **disks.py, a new reason a VM can't be pooled:** add it to `red` in `screen` (from what the cloud reports) or in `assess` (from what the VM reports). The report lists that VM under Not in the saving yet, with the reason. A reason in `amber` is a fix the VM needs first; on its own it leaves the VM in the saving. Update the list under "Not in the saving yet" in the README.
 - **disks.py, a new disk type:** add it to `DISK_TYPES`, then teach `add_price` and `price_disk` its price meters (on AWS, `EBS_BILLS`).
 - **Any check that needs a new CLI call or permission:** add it to "Access it needs" in the README.
 
@@ -106,14 +107,14 @@ python3 k8s.py --help
 python3 k8s.py --context no-such-context --no-prices --sample-minutes 0 --out /tmp/zoorik-report/
 ```
 
-- The last command reaches no cluster. It shows that a run still finishes, and writes a report, when a cluster can't be assessed.
+- The last command reaches no cluster. It shows that a run still finishes, and writes a report, when a cluster can't be assessed. CI checks that the report is a whole PDF: it starts with `%PDF-`, ends with `%%EOF`, and its cross-reference table points at each object.
 - CI also runs disks.py where neither `az` nor `aws` is installed, and checks that it stops with the message that asks for one. Where both are installed but not signed in, it checks that both scripts say to sign in, which shows they found `az.cmd` on Windows.
 - CI also installs the package with `pip install .` and runs the same no-cluster report through `zoorik assess coral`, and checks that `npx zoorik` (the `npm/` folder) runs the PyPI package, on all three systems.
 - `ruff.toml` sets Python 3.8 as the target, so ruff also flags syntax that is newer than 3.8. If you use uv, `uv run --python 3.8 k8s.py --help` tries Python 3.8 locally.
 
 To try the AWS path of disks.py without an account, put a small fake `aws` script first on your PATH that prints canned JSON for the calls `disks.py` makes (each goes through `aws(...)`), and keep `az` off the PATH.
 
-Then run your change for real, against a cluster, subscription or AWS account you own, and open the report. Excel, LibreOffice and Google Sheets all open it. In the pull request, say what you ran and what changed in the report. Replace your own names, or run k8s.py with `--anonymize`. Never commit a report file: it names things in your account.
+Then run your change for real, against a cluster, subscription or AWS account you own, and open the report in any PDF viewer. To compare it with the report from `main`, render both with `pdftoppm -png -r 110 REPORT.pdf page` (poppler) and look at the pages side by side. In the pull request, say what you ran and what changed in the report. Replace your own names, or run k8s.py with `--anonymize`. Never commit a report file: it names things in your account.
 
 ## Code style
 

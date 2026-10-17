@@ -1,3 +1,3 @@
 """Zoorik's cost assessments, as the zoorik command: zoorik assess coral and zoorik assess amoeba."""
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"

@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for telling us. This repo is public, so please don't attach your Excel report, and replace cluster, VM, subscription and account names with placeholders such as `cluster-a`. You can also e-mail the report to founders@zoorik.com.
+        Thanks for telling us. This repo is public, so please don't attach your PDF report, and replace cluster, VM, subscription and account names with placeholders such as `cluster-a`. You can also e-mail the report to founders@zoorik.com.
   - type: dropdown
     id: script
     attributes:
@@ -52,7 +52,7 @@ body:
     id: happened
     attributes:
       label: What happened
-      description: The console output, with names replaced. If the problem is in the report, paste the text of its Status, Reason, Note or Price note column.
+      description: The console output, with names replaced. If the problem is in the report, copy the line in question, such as the reason under Not in the saving yet.
     validations:
       required: true
   - type: textarea
