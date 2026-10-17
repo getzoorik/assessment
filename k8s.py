@@ -33,10 +33,12 @@ What it does:
   - It sends nothing to Zoorik. Its only calls go to your clusters, your
     cloud's own APIs and the public Azure price list (prices.azure.com),
     which receives a region and a machine type.
-  - It writes one file, the Excel report. Its working files (kubectl's cache,
-    and a kubeconfig for the clusters it finds through az or aws) go in a
-    temporary folder that is deleted when it exits; your own kubeconfig is
-    never changed.
+  - It writes one file, the Excel report, named with the run's time in UTC.
+    It never overwrites an earlier report: a second run in the same minute
+    adds -2, -3 and so on, and a file name given with --out is written as
+    chosen. Its working files (kubectl's cache, and a kubeconfig for the
+    clusters it finds through az or aws) go in a temporary folder that is
+    deleted when it exits; your own kubeconfig is never changed.
 """
 
 from __future__ import annotations
@@ -72,7 +74,7 @@ from xml.sax.saxutils import escape
 
 # ---------------------------------------------------------------- config
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 ONE_LINER = "curl -fsSL https://zoorik.com/assess/k8s | python3 -"
 SEND_TO = "founders@zoorik.com"
 
@@ -1694,12 +1696,21 @@ def parse_args(argv: Optional[list]) -> argparse.Namespace:
     return args
 
 
+def unused_path(folder: str, stem: str) -> str:
+    """A report path in the folder that no earlier report holds, so nothing is overwritten."""
+    path, n = os.path.join(folder, stem + ".xlsx"), 1
+    while os.path.exists(path):
+        n += 1
+        path = os.path.join(folder, f"{stem}-{n}.xlsx")
+    return path
+
+
 def output_path(out: Optional[str], cloud_shell: str) -> str:
     """Choose the report's path before any work, so a folder that can't be written is found early."""
-    name = f"zoorik-k8s-assessment-{datetime.now(timezone.utc):%Y%m%d-%H%M}.xlsx"
+    stem = f"zoorik-k8s-assessment-{datetime.now(timezone.utc):%Y%m%d-%H%M}"
     if out:
         if out.endswith(("/", os.sep)) or os.path.isdir(out):
-            path = os.path.join(out, name)
+            path = unused_path(out, stem)
         else:
             path = out if out.lower().endswith(".xlsx") else out + ".xlsx"
         folder = os.path.dirname(os.path.abspath(path))
@@ -1713,7 +1724,7 @@ def output_path(out: Optional[str], cloud_shell: str) -> str:
     home = os.path.expanduser("~")
     for folder in [home] if cloud_shell else [os.getcwd(), home]:
         if os.access(folder, os.W_OK):
-            return os.path.join(folder, name)
+            return unused_path(folder, stem)
     raise Failed("cannot write to the current folder or the home folder; choose one with --out PATH")
 
 
