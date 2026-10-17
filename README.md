@@ -12,12 +12,12 @@ Each script is one Python file. It needs Python 3.8 or later and uses only the s
 The same two files are also on PyPI, as the `zoorik` package, for a command you install once:
 
 ```bash
-pipx install zoorik    # or: pip install zoorik
-zoorik k8s             # runs k8s.py, with the same options
-zoorik disks           # runs disks.py
+pip install zoorik
+zoorik assess coral    # runs k8s.py, with the same options
+zoorik assess amoeba   # runs disks.py
 ```
 
-Each PyPI release is built from a release tag of this repo by its [release workflow](https://github.com/getzoorik/assessment/blob/main/.github/workflows/release.yaml).
+With Node.js, `npx zoorik assess coral` does the same: it runs the PyPI package in a private Python environment. Each PyPI release is built from a release tag of this repo by its [release workflow](https://github.com/getzoorik/assessment/blob/main/.github/workflows/release.yaml).
 
 ---
 

@@ -1,0 +1,24 @@
+{
+  "name": "zoorik",
+  "version": "1.1.0",
+  "description": "Zoorik's free cloud cost assessment: npx zoorik assess coral",
+  "keywords": ["kubernetes", "aks", "eks", "azure", "aws", "cloud cost", "assessment"],
+  "homepage": "https://zoorik.com/assessment",
+  "bugs": "https://github.com/getzoorik/assessment/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/getzoorik/assessment.git",
+    "directory": "npm"
+  },
+  "license": "Apache-2.0",
+  "author": "Zoorik <founders@zoorik.com>",
+  "bin": {
+    "zoorik": "bin/zoorik.js"
+  },
+  "files": [
+    "bin/zoorik.js"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}

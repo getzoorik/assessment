@@ -33,19 +33,36 @@ jobs:
         run: |
           python k8s.py --context no-such-context --no-prices --sample-minutes 0 --out "$RUNNER_TEMP/report/"
           python -c "import glob, zipfile; [f] = glob.glob('$RUNNER_TEMP/report/*.xlsx'); assert zipfile.ZipFile(f).testzip() is None"
-      - name: The zoorik package installs, and zoorik k8s writes the same report
+      - name: The zoorik package installs, and zoorik assess coral writes the same report
         run: |
           python -m pip install .
           zoorik --version
+          zoorik assess coral --version
+          zoorik assess amoeba --version
           zoorik k8s --version
-          zoorik disks --version
-          zoorik k8s --context no-such-context --no-prices --sample-minutes 0 --out "$RUNNER_TEMP/package-report/"
+          zoorik assess coral --context no-such-context --no-prices --sample-minutes 0 --out "$RUNNER_TEMP/package-report/"
           python -c "import glob, zipfile; [f] = glob.glob('$RUNNER_TEMP/package-report/*.xlsx'); assert zipfile.ZipFile(f).testzip() is None"
       - name: disks.py stops with a clear message when az is missing
         run: |
           if PATH="$(dirname "$(command -v python)")" python disks.py < /dev/null > disks.out; then exit 1; fi
           cat disks.out
           grep -q "This needs the Azure CLI" disks.out
+
+  npm:
+    name: npx zoorik
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "18"
+      - name: The npm package holds only its launcher, and the launcher runs the PyPI package
+        working-directory: npm
+        run: |
+          npm pack --dry-run --json | node -e "const f=JSON.parse(require('fs').readFileSync(0))[0].files.map(x=>x.path).sort().join(' '); if (f !== 'LICENSE README.md bin/zoorik.js package.json') { console.error(f); process.exit(1) }"
+          node bin/zoorik.js --version | grep -E '^zoorik [0-9]'
 
   ruff:
     name: Ruff
