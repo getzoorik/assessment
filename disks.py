@@ -36,7 +36,7 @@ answer y, it only reads, and it sends nothing anywhere.
   Only if you answer y to its question: one command that only reads, inside
   each running Linux VM with data disks, through Azure Run Command or AWS
   Systems Manager Run Command. It reads used space (df, lsblk), the kernel
-  version, the Linux distribution and whether btrfs is available. On its
+  version and whether btrfs is available. On its
   side, Azure adds its Run Command extension to a VM that does not have it
   yet, keeps a copy of the command and its output under /var/lib/waagent on
   the VM, and records each run in the activity log. Systems Manager keeps the
@@ -74,7 +74,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------- config
 
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 ONE_LINER = "curl -fsSL https://zoorik.com/assess/disks | python3 -"
 SEND_TO = "founders@zoorik.com"
 
@@ -196,15 +196,11 @@ TIER_PRODUCTS = ("Premium SSD Managed Disks", "Standard SSD Managed Disks", "Sta
 PROVISIONED_PRODUCTS = {"Azure Premium SSD v2": "Premium LRS ", "Ultra Disks": "Ultra LRS "}
 PROVISIONED_METERS = {"Provisioned Capacity": "capacity", "Provisioned IOPS": "iops",
                       "Provisioned Throughput (MBps)": "mbps"}
-RHEL_FAMILY = ("rhel", "centos", "rocky", "almalinux", "ol")
-# A distribution whose ID_LIKE names one of these is RHEL-family too, as Amoeba's agent reads it: Amazon Linux is.
-RHEL_LIKE = ("rhel", "centos", "fedora")
 
 # The one command that runs inside a VM, and only after a yes. It only reads. The two clouds differ only in how a
 # data disk shows in the VM: by LUN on Azure, by volume id (an NVMe serial) on AWS.
 _GUEST_HEAD = r"""echo S
 echo "K $(uname -r)"
-grep -E '^(ID|ID_LIKE)=' /etc/os-release
 if grep -qw btrfs /proc/filesystems; then echo "B loaded"; elif modinfo -n btrfs >/dev/null 2>&1; then echo "B module"; else echo "B absent"; fi
 """
 _GUEST_TAIL = r"""
@@ -494,8 +490,6 @@ class DataDisk:
 @dataclass
 class Guest:
     kernel: str = ""
-    os_id: str = ""
-    os_like: str = ""
     btrfs: str = ""
     luns: Dict[int, List[str]] = field(default_factory=dict)
     mounts: Dict[str, int] = field(default_factory=dict)
@@ -513,7 +507,6 @@ class Vm:
     size: str
     os_type: str
     power: str
-    os_name: str
     data: List[DataDisk]
     cloud: str = "azure"
     slots: Optional[int] = None
@@ -597,7 +590,6 @@ VM_QUERY = """resources
     size = tostring(properties.hardwareProfile.vmSize),
     osType = tostring(properties.storageProfile.osDisk.osType),
     power = tostring(properties.extended.instanceView.powerState.code),
-    osName = tostring(properties.extended.instanceView.osName),
     dataDisks = properties.storageProfile.dataDisks
 | order by id asc"""
 DISK_QUERY = """resources
@@ -670,7 +662,7 @@ def make_vm(r: dict, disks: Dict[str, Disk]) -> Vm:
     return Vm(id=r.get("id") or "", name=r.get("name") or "", subscription=r.get("subscriptionId") or "",
               resource_group=r.get("resourceGroup") or "", region=(r.get("location") or "").lower(),
               zone=",".join(r.get("zones") or []), size=r.get("size") or "", os_type=r.get("osType") or "",
-              power=power.capitalize(), os_name=r.get("osName") or "", data=sorted(data, key=lambda x: x.lun))
+              power=power.capitalize(), data=sorted(data, key=lambda x: x.lun))
 
 
 def managing_service(managed_by: str) -> str:
@@ -756,8 +748,7 @@ def make_instance(i: dict, account: str, region: str, volumes: Dict[str, Disk]) 
     return Vm(id=i.get("InstanceId") or "", name=tags(i).get("Name") or i.get("InstanceId") or "",
               subscription=account, resource_group="", region=region, zone="", size=i.get("InstanceType") or "",
               os_type="Windows" if (i.get("Platform") or "").lower() == "windows" else "Linux",
-              power=((i.get("State") or {}).get("Name") or "").capitalize(), os_name=i.get("PlatformDetails") or "",
-              data=data, cloud="aws")
+              power=((i.get("State") or {}).get("Name") or "").capitalize(), data=data, cloud="aws")
 
 
 def ebs_limits(vm: Vm, instance: dict, itype: dict) -> None:
@@ -812,14 +803,11 @@ def aws_region(scope: Subscription) -> Tuple[List[Vm], int]:
         try:
             found = aws(["ssm", "describe-instance-information", "--filters", "Key=PingStatus,Values=Online",
                          "Key=ResourceType,Values=EC2Instance"], region) or {}
-            managed, unmanaged = {m.get("InstanceId"): m for m in found.get("InstanceInformationList") or []}, ""
+            managed, unmanaged = {m.get("InstanceId") for m in found.get("InstanceInformationList") or []}, ""
         except Failed as e:
-            managed, unmanaged = {}, f"Systems Manager not readable: {e}"
+            managed, unmanaged = set(), f"Systems Manager not readable: {e}"
         for v in vms:
-            info = managed.get(v.id)
-            if info:
-                v.os_name = info.get("PlatformName") or v.os_name
-            else:
+            if v.id not in managed:
                 v.channel = unmanaged or "Systems Manager does not manage it (no SSM agent reporting)"
     return vms, len(volumes)
 
@@ -1186,14 +1174,6 @@ def parse_guest(text: str) -> Guest:
         raise Failed("the command's output came back incomplete")
     g = Guest()
     for line in lines:
-        key, _, value = line.partition("=")
-        if key in ("ID", "ID_LIKE") and value:
-            value = value.strip().strip("\"'").lower()
-            if key == "ID":
-                g.os_id = value
-            else:
-                g.os_like = value
-            continue
         tag, _, rest_of_line = line.partition(" ")
         if tag == "K":
             g.kernel = rest_of_line.strip()
@@ -1218,15 +1198,6 @@ def parse_guest(text: str) -> Guest:
 def kernel_version(kernel: str) -> Optional[Tuple[int, int]]:
     match = re.match(r"(\d+)\.(\d+)", kernel or "")
     return (int(match.group(1)), int(match.group(2))) if match else None
-
-
-def rhel_family(vm: Vm) -> bool:
-    g = vm.guest
-    if g and g.os_id:
-        return g.os_id in RHEL_FAMILY or any(word in RHEL_LIKE for word in g.os_like.split())
-    name = vm.os_name.lower()
-    return any(word in name for word in ("rhel", "red hat", "redhat", "centos", "rocky", "alma", "oracle",
-                                         "amazon linux"))
 
 
 # ---------------------------------------------------------------- pool sizing (as Zoorik Amoeba plans it)
@@ -1410,8 +1381,6 @@ def screen(vm: Vm) -> List[str]:
         red.append(f"too few data-disk slots ({vm.slots}): Amoeba needs {MIN_VM_SLOTS} or more")
     if vm.nvme is False:
         red.append(f"{vm.size} is an older instance type: Amoeba needs a Nitro instance type")
-    if vm.linux and rhel_family(vm):
-        red.append("Red Hat family Linux: not supported yet")
     return red
 
 
@@ -1563,8 +1532,8 @@ def assess(vm: Vm, prices: Dict[str, Optional[Prices]]) -> None:
     on_data, mounts = (data_mounts(vm), poolable(vm)) if g else ({}, {})
     if g:
         version = kernel_version(g.kernel)
-        if not rhel_family(vm) and g.btrfs not in ("loaded", "module"):
-            red.append("this Linux kernel is not supported yet")
+        if g.btrfs not in ("loaded", "module"):
+            red.append(f"no btrfs in its Linux kernel ({g.kernel}): Amoeba needs btrfs")
         if version and version < KERNEL_FLOOR:
             amber.append(f"needs work first: upgrade its Linux kernel ({g.kernel}) to 5.14 or later")
         if not mounts:

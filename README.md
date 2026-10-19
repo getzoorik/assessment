@@ -235,7 +235,7 @@ Both Cloud Shells close a session after about 20 minutes without a key press. On
 
 **AWS, in each enabled region:**
 - **EC2:** your instances and EBS volumes, and the EBS limits of each instance type with data volumes (volume slots, baseline IOPS and throughput, whether its volumes are NVMe devices).
-- **Systems Manager:** which instances its agent manages, and their Linux distribution.
+- **Systems Manager:** which instances its agent manages.
 - **CloudWatch:** 14 days of IOPS and throughput for the data volumes the pool would replace, on each instance whose disk usage was read, as each hour's busiest minute. The metrics are VolumeReadOps, VolumeWriteOps, VolumeReadBytes and VolumeWriteBytes, with the Maximum statistic over AWS's 1-minute data points. These requests count toward CloudWatch's free tier of 1 million API requests a month.
 - **The AWS Price List API:** EBS list prices, through `aws pricing get-products`.
 
@@ -251,7 +251,7 @@ Read disk usage inside these N instance(s) with Systems Manager Run Command? [y/
 ```
 
 **If you answer y**, the command runs in each of those VMs, 8 at a time. It reads:
-- the kernel version and the Linux distribution;
+- the kernel version;
 - whether btrfs is available;
 - which mounts sit on each data disk;
 - used space, from `df`.
@@ -270,19 +270,18 @@ Read disk usage inside these N instance(s) with Systems Manager Run Command? [y/
 
 **Ctrl-C** stops the script at once, and no new command starts after it. Commands already started finish in the cloud, and the script's last line says how many VMs they reached.
 
-This is the command. The two clouds differ only in the fifth line, which finds the data disks:
+This is the command. The two clouds differ only in the fourth line, which finds the data disks:
 
 ```sh
 echo S
 echo "K $(uname -r)"
-grep -E '^(ID|ID_LIKE)=' /etc/os-release
 if grep -qw btrfs /proc/filesystems; then echo "B loaded"; elif modinfo -n btrfs >/dev/null 2>&1; then echo "B module"; else echo "B absent"; fi
 for l in /dev/disk/azure/scsi1/lun*; do n=${l##*/lun}; case $n in ''|*[!0-9]*) continue;; esac; echo "L $n $(lsblk -nro MOUNTPOINT "$l" | tr '\n' ' ')"; done
 timeout 30 df -P -B1 -l | awk '$1 ~ /^\/dev\// && $1 !~ /^\/dev\/loop/ {m=$6; for (i=7; i<=NF; i++) m=m" "$i; print "D", $3, m}'
 echo E
 ```
 
-On AWS the fifth line is:
+On AWS the fourth line is:
 
 ```sh
 for l in /dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_vol*; do case $l in *-part*) continue;; esac; [ -e "$l" ] || continue; v=${l##*_vol}; echo "V vol-${v%%[-_]*} $(lsblk -nro MOUNTPOINT "$l" | tr '\n' ' ')"; done
@@ -390,13 +389,15 @@ The script estimates a saving for each Linux VM whose disk usage was read.
 Data disks without a mounted file system stay as they are.
 
 **Not in the saving yet.** A VM with data disks is in the saving when its disk usage was read and the pool costs less than the disks it replaces. The report lists every other one under Not in the saving yet, with the reason, such as:
-- Windows; RHEL-family Linux, which includes Amazon Linux; no btrfs in the kernel; or no mounted data disk other than shared disks;
+- Windows; a Linux kernel without btrfs; or no mounted data disk other than shared disks;
 - on Azure, a VM in a resource group another Azure service manages, such as Azure Databricks or an AKS node resource group, or a VM size with fewer than 8 data-disk slots;
 - on AWS, a Xen instance type, because Amoeba needs a Nitro type, where each EBS volume is an NVMe device named by its volume id;
 - disk usage not read, for example because you answered no, the VM is not running, or Systems Manager doesn't manage the instance;
 - not enough free data-disk slots to build the pool beside today's disks;
 - no metrics, or no list price, for the disks the pool replaces;
 - a pool that would cost no less.
+
+btrfs is read from each VM's running kernel, not from its distribution. The stock kernels of Ubuntu, Amazon Linux 2023, Fedora and Oracle Linux's UEK carry it; those of RHEL, Rocky Linux and AlmaLinux 9, and Oracle Linux's Red Hat compatible kernel, do not.
 
 A VM that needs a fix first, such as a kernel below 5.14 or Azure Disk Encryption, stays in the saving.
 
