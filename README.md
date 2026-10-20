@@ -1,8 +1,5 @@
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset=".github/brand/zoorik-logo-tagline-rings-opposite-bone.svg">
-    <img alt="Zoorik. Reduce cloud cost, autonomously." src=".github/brand/zoorik-logo-tagline-rings-opposite-navy.svg" width="320">
-  </picture>
+  <img alt="Zoorik. Reduce cloud cost, autonomously." src=".github/brand/zoorik-reveal-tagline-on-navy-960x540.gif" width="640">
 </p>
 
 # Zoorik assessments
