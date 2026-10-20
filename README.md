@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/brand/zoorik-logo-tagline-rings-opposite-bone.svg">
+    <img alt="Zoorik. Reduce cloud cost, autonomously." src=".github/brand/zoorik-logo-tagline-rings-opposite-navy.svg" width="320">
+  </picture>
+</p>
+
 # Zoorik assessments
 
 Zoorik's free cloud cost assessment for Coral (Kubernetes) and Amoeba (block storage). One command estimates how much you can reduce your cloud bill. It sends nothing anywhere: it writes one PDF report for you to email to founders@zoorik.com.
@@ -429,3 +436,8 @@ This repo is public, so please don't paste a report or your account's names into
 ## License
 
 Apache-2.0, see [LICENSE](https://github.com/getzoorik/assessment/blob/main/LICENSE). Copyright 2026 Zoorik Private Limited.
+
+---
+
+<p align="center"><sub><a href="https://zoorik.com">zoorik.com</a> · <a href="https://zoorik.com/docs">Docs</a> · <a href="https://zoorik.com/security">Security</a> · <a href="https://github.com/getzoorik">Zoorik on GitHub</a></sub></p>
+<p align="center"><sub>The Zoorik, Coral and Amoeba names and logos belong to Zoorik Private Limited.</sub></p>
