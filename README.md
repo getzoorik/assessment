@@ -1,5 +1,5 @@
 <p align="center">
-  <img alt="Zoorik. Reduce cloud cost, autonomously." src=".github/brand/zoorik-reveal-tagline-on-navy-960x540.gif" width="640">
+  <img alt="Zoorik. Reduce cloud cost, autonomously." src=".github/brand/zoorik-reveal-tagline-banner-on-navy-960x240.gif" width="100%">
 </p>
 
 # Zoorik assessments
