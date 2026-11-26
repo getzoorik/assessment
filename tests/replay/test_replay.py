@@ -67,6 +67,14 @@ class ReplayRunnerTest(unittest.TestCase):
         with self.assertRaisesRegex(CommandTimedOut, "^no answer from az within 120 s$"):
             runner.run(TOP, 120, {})
 
+    def test_the_calls_a_run_never_made_are_named(self) -> None:
+        """Each recorded call left over is named by its key, once for each answer left."""
+        runner = ReplayRunner([answered(TOP, "first\n"), answered(TOP, "second\n")], self.root, self.clock)
+        self.assertEqual(runner.unused(), [json.dumps(TOP), json.dumps(TOP)])
+        runner.run(TOP, 60, {})
+        runner.run(TOP, 60, {})
+        self.assertEqual(runner.unused(), [])
+
     def test_each_call_takes_its_recorded_time(self) -> None:
         """The clock moves on by each call's recorded time."""
         runner = ReplayRunner([answered(TOP, "first\n"), answered(TOP, "second\n")], self.root, self.clock)
@@ -91,6 +99,15 @@ class ReplayHttpAndPromptTest(unittest.TestCase):
             http.get_json(PRICES)
         with self.assertRaises(ReplayError):
             http.get_json(PRICES)
+
+    def test_fetches_and_answers_left_over_are_named(self) -> None:
+        """A fetch the run never made is named by its URL, and an answer no question took is named too."""
+        http = ReplayHttp([Fetch(PRICES, Body({"Items": []}))])
+        prompt = ReplayPrompt([False])
+        self.assertEqual((http.unused(), prompt.unused()), ([PRICES], ["y/N"]))
+        http.get_json(PRICES)
+        prompt.ask("Read disk use inside the VMs? [y/N] ")
+        self.assertEqual((http.unused(), prompt.unused()), ([], []))
 
     def test_answers_come_in_order(self) -> None:
         """The y/N answers come in order, no terminal included, and one more question fails the replay."""

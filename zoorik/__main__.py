@@ -42,7 +42,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         k8s.ONE_LINER = "zoorik assess coral"
         return k8s.main(rest)
     if name == "amoeba":
-        from zoorik import disks
+        from zoorik import disks_script as disks
         disks.ONE_LINER = "zoorik assess amoeba"
         return disks.main(rest)
     sys.stderr.write(f"zoorik: no assessment called {name!r}. Try: zoorik assess coral\n\n{USAGE}")

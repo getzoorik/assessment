@@ -37,7 +37,8 @@ packages = ["zoorik"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "k8s.py" = "zoorik/k8s.py"
-"disks.py" = "zoorik/disks.py"
+# zoorik/disks is the disk method's package, so disks.py ships under another name.
+"disks.py" = "zoorik/disks_script.py"
 
 [tool.hatch.build.targets.sdist]
 include = ["/zoorik", "/k8s.py", "/disks.py", "/README.md", "/LICENSE"]
@@ -58,6 +59,7 @@ name = "Each layer imports only the layers below it"
 type = "layers"
 layers = [
   "zoorik.report",
+  "zoorik.disks",
   "zoorik.kubectl | zoorik.pricing",
   "zoorik.cloud",
   "zoorik.system",

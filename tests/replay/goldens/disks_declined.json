@@ -1,0 +1,70 @@
+{
+ "console": [
+  "Subscription subscription-one: 1 VM, 1 disk"
+ ],
+ "questions": [
+  "\nDisk usage\n  1 running Linux VM has data disks:\n    subscription-one: vm-one\n\n  The saving needs the used space on those disks, which only the VM itself can report.\n  With your yes, this command, which only reads, runs in each VM through Azure Run\n  Command, 8 VMs at a time (about 1 min):\n\n    echo S\n    echo \"K $(uname -r)\"\n    if grep -qw btrfs /proc/filesystems; then echo \"B loaded\"; elif modinfo -n btrfs >/dev/null 2>&1; then echo \"B module\"; else echo \"B absent\"; fi\n    for l in /dev/disk/azure/scsi1/lun*; do n=${l##*/lun}; case $n in ''|*[!0-9]*) continue;; esac; echo \"L $n $(lsblk -nro MOUNTPOINT \"$l\" | tr '\\n' ' ')\"; done\n    timeout 30 df -P -B1 -l | awk '$1 ~ /^\\/dev\\// && $1 !~ /^\\/dev\\/loop/ {m=$6; for (i=7; i<=NF; i++) m=m\" \"$i; print \"D\", $3, m}'\n    echo E\n\n  On its side, Azure adds its Run Command extension (RunCommandLinux) to a VM that does not\n  have it yet, keeps a copy of the command and its output under /var/lib/waagent on the VM,\n  and records each run in the activity log. It needs the permission\n  Microsoft.Compute/virtualMachines/runCommand/action (Virtual Machine Contributor has it);\n  a VM without it shows no saving, with the reason.\n\nRead disk usage inside 1 VM with Azure Run Command? [y/N] "
+ ],
+ "result": {
+  "after": 130,
+  "not_assessed": [],
+  "saving": 0,
+  "subscriptions": {
+   "sub-one": "subscription-one"
+  },
+  "today": 130,
+  "unread": [],
+  "vms": [
+   {
+    "current": 130.0,
+    "price_note": "",
+    "reasons": [
+     "disk usage not read: declined at the prompt"
+    ],
+    "saving": null,
+    "used_gb": null,
+    "vm": {
+     "account": "sub-one",
+     "channel": null,
+     "cloud": "azure",
+     "data": [
+      {
+       "device": "",
+       "disk": {
+        "ade": false,
+        "cloud": "azure",
+        "id": "/subscriptions/sub-one/resourceGroups/group-one/providers/Microsoft.Compute/disks/data-one",
+        "iops": 5000,
+        "mbps": 200,
+        "region": "westeurope",
+        "shared": false,
+        "size_gb": 1024,
+        "sku": "Premium_LRS",
+        "tier": "P30"
+       },
+       "lun": 0,
+       "note": "",
+       "size_gb": 1024
+      }
+     ],
+     "facts_note": "",
+     "id": "/subscriptions/sub-one/resourceGroups/group-one/providers/Microsoft.Compute/virtualMachines/vm-one",
+     "limits": {
+      "slots": 16,
+      "uncached_iops": 12800,
+      "uncached_mbps": 290,
+      "v2": true
+     },
+     "managed_by": null,
+     "name": "vm-one",
+     "os_type": "Linux",
+     "power": "Running",
+     "region": "westeurope",
+     "size": "Standard_D8s_v5",
+     "zone": "1"
+    }
+   }
+  ]
+ },
+ "started": "Nothing in your cloud was changed."
+}

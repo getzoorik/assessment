@@ -77,6 +77,9 @@ SSM_DELIVERY_SECONDS = 300
 # CloudWatch figures are read per hour.
 CLOUDWATCH_PERIOD = 3600
 SPOT_PRODUCT = "Linux/UNIX"
+# A Nitro instance type that lists no attachment limit of its own shares 28 among its network interfaces, EBS volumes
+# and NVMe instance store volumes.
+NITRO_ATTACHMENTS = 28
 
 
 @dataclass(frozen=True)

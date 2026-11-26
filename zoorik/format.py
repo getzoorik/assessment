@@ -5,6 +5,7 @@ import math
 # A figure worked out in floats can land a hair below a half, as 730 x 0.35 gives 255.49999999999997 for 255.5; this
 # tiny addition carries it past that noise before rounding.
 CARRY = 1e-9
+GIB = 2**30
 MIB_PER_GIB = 1024
 SECONDS_PER_MINUTE = 60
 

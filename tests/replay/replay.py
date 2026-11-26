@@ -3,7 +3,7 @@
 import collections
 import os
 import threading
-from typing import Deque, Dict, Generic, Iterable, Mapping, Optional, Sequence, Tuple, Type, TypeVar
+from typing import Deque, Dict, Generic, Iterable, List, Mapping, Optional, Sequence, Tuple, Type, TypeVar
 
 from tests.replay.recording import TEMP, Call, Failure, Fetch, call_key
 from zoorik.errors import AssessmentError
@@ -43,6 +43,11 @@ class AnswerQueues(Generic[Answer]):
                 raise ReplayError(f"no recorded answer left for {key}")
             return queue.popleft()
 
+    def left(self) -> List[str]:
+        """Name the key of each answer nothing took, in key order."""
+        with self._lock:
+            return sorted(key for key, queue in self._queues.items() for _ in queue)
+
 
 class ReplayRunner:
     """A CommandRunner that answers from recorded calls, and writes again the files each call wrote."""
@@ -65,6 +70,10 @@ class ReplayRunner:
 
     def end_children(self) -> None:
         """End nothing: a replayed call starts no program."""
+
+    def unused(self) -> List[str]:
+        """Name the key of each recorded call the run never made."""
+        return self._calls.left()
 
     def _write(self, path: str, text: str) -> None:
         """Write a file a recorded call wrote, in this run's temporary folder."""
@@ -92,6 +101,10 @@ class ReplayHttp:
             raise raised(fetch.outcome)
         return fetch.outcome.value
 
+    def unused(self) -> List[str]:
+        """Name the URL of each recorded fetch the run never made."""
+        return self._fetches.left()
+
 
 class ReplayPrompt:
     """A Prompt that gives the recorded answers in order."""
@@ -103,3 +116,7 @@ class ReplayPrompt:
     def ask(self, question: str) -> Optional[bool]:
         """Give the next recorded answer."""
         return self._answers.take("y/N")
+
+    def unused(self) -> List[str]:
+        """Name each recorded answer no question took."""
+        return self._answers.left()

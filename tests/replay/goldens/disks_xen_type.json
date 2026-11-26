@@ -1,0 +1,67 @@
+{
+ "console": [
+  "Region eu-west-1: 1 instance, 2 volumes"
+ ],
+ "questions": [],
+ "result": {
+  "after": 50,
+  "not_assessed": [],
+  "saving": 0,
+  "subscriptions": {},
+  "today": 50,
+  "unread": [],
+  "vms": [
+   {
+    "current": 50.0,
+    "price_note": "",
+    "reasons": [
+     "m4.xlarge is an older instance type: a pool needs a Nitro instance type"
+    ],
+    "saving": null,
+    "used_gb": null,
+    "vm": {
+     "account": "123456789012",
+     "channel": null,
+     "cloud": "aws",
+     "data": [
+      {
+       "device": "/dev/sdf",
+       "disk": {
+        "ade": false,
+        "cloud": "aws",
+        "id": "vol-01",
+        "iops": 1500,
+        "mbps": null,
+        "region": "eu-west-1",
+        "shared": false,
+        "size_gb": 500,
+        "sku": "gp2",
+        "tier": ""
+       },
+       "lun": 0,
+       "note": "",
+       "size_gb": 500
+      }
+     ],
+     "facts_note": "",
+     "id": "i-01",
+     "limits": {
+      "free_slots": 20,
+      "nitro": false,
+      "slots": 21,
+      "uncached_iops": 6000,
+      "uncached_mbps": 93
+     },
+     "managed_by": null,
+     "name": "i-01",
+     "os_type": "Linux",
+     "power": "Running",
+     "region": "eu-west-1",
+     "size": "m4.xlarge",
+     "zone": null
+    }
+   }
+  ]
+ },
+ "started": "Nothing in your cloud was changed."
+}

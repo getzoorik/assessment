@@ -1,0 +1,26 @@
+{
+ "console": [
+  "Region us-east-1: 1 instance, 2 volumes",
+  "1 region with no instances or volumes.",
+  "1 instance not assessed, could not tell whether they are EKS nodes: access denied"
+ ],
+ "questions": [],
+ "result": {
+  "after": 0,
+  "not_assessed": [
+   {
+    "account": "123456789012",
+    "cloud": "aws",
+    "name": "i-01",
+    "reason": "could not tell whether they are EKS nodes: access denied",
+    "region": "us-east-1"
+   }
+  ],
+  "saving": 0,
+  "subscriptions": {},
+  "today": 0,
+  "unread": [],
+  "vms": []
+ },
+ "started": "Nothing in your cloud was changed."
+}

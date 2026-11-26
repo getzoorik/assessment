@@ -1,0 +1,67 @@
+{
+ "console": [
+  "Region eu-west-1: 5 instances, 5 volumes"
+ ],
+ "questions": [],
+ "result": {
+  "after": 50,
+  "not_assessed": [],
+  "saving": 0,
+  "subscriptions": {},
+  "today": 50,
+  "unread": [],
+  "vms": [
+   {
+    "current": 50.0,
+    "price_note": "",
+    "reasons": [
+     "disk usage not read: VM is not running"
+    ],
+    "saving": null,
+    "used_gb": null,
+    "vm": {
+     "account": "123456789012",
+     "channel": "Systems Manager does not manage it (no SSM agent reporting)",
+     "cloud": "aws",
+     "data": [
+      {
+       "device": "/dev/sdf",
+       "disk": {
+        "ade": false,
+        "cloud": "aws",
+        "id": "vol-05",
+        "iops": 1500,
+        "mbps": null,
+        "region": "eu-west-1",
+        "shared": false,
+        "size_gb": 500,
+        "sku": "gp2",
+        "tier": ""
+       },
+       "lun": 0,
+       "note": "",
+       "size_gb": 500
+      }
+     ],
+     "facts_note": "",
+     "id": "i-05",
+     "limits": {
+      "free_slots": 20,
+      "nitro": true,
+      "slots": 21,
+      "uncached_iops": 12000,
+      "uncached_mbps": 312
+     },
+     "managed_by": null,
+     "name": "i-05",
+     "os_type": "Linux",
+     "power": "Stopped",
+     "region": "eu-west-1",
+     "size": "m6i.2xlarge",
+     "zone": null
+    }
+   }
+  ]
+ },
+ "started": "Nothing in your cloud was changed."
+}
