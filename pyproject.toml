@@ -57,6 +57,7 @@ root_package = "zoorik"
 name = "Each layer imports only the layers below it"
 type = "layers"
 layers = [
+  "zoorik.report",
   "zoorik.system",
   "zoorik.console | zoorik.format | zoorik.output",
   "zoorik.errors",
@@ -73,3 +74,9 @@ name = "Only the runtime holds the HTTP client"
 type = "protected"
 protected_modules = ["zoorik.system.http"]
 allowed_importers = ["zoorik.system.runtime"]
+
+[[tool.importlinter.contracts]]
+name = "Only the report draws the PDF"
+type = "protected"
+protected_modules = ["zoorik.report.pdf", "zoorik.report.blocks"]
+allowed_importers = ["zoorik.report"]
