@@ -56,14 +56,14 @@ def record(out: str, command: List[str]) -> int:
     if os.path.lexists(out):
         raise SystemExit(f"{out} exists; a recording never replaces a file")
     recorder, code = run_for_real(command[1:])
-    save(recorder.recording, out)
+    save(recorder.finished(), out)
     return code
 
 
 def run_for_real(argv: List[str]) -> Tuple[Recorder, int]:
     """Run zoorik assess with argv against the clouds you are signed in to, recording it; give the exit code too."""
     run = importlib.import_module("zoorik.cli").run
-    recorder = Recorder(argv, real_runtime(UrllibHttpClient(SystemClock())), Redactor(kubectl_lists={}))
+    recorder = Recorder(argv, real_runtime(UrllibHttpClient(SystemClock())), Redactor())
     code: int = run(argv, recorder.runtime)
     return recorder, code
 

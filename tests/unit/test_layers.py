@@ -132,13 +132,16 @@ class DetectorsTest(unittest.TestCase):
         self.assertEqual(argv_heads(tree), {"az", "kubectl"})
 
     def test_each_rule_finds_the_modules_it_allows(self) -> None:
-        """The runner, the HTTP policy and both cloud readers are found, so each rule checks real code."""
+        """The runner, the HTTP policy, the cloud readers and the direct cluster read are found, so each rule checks."""
         found = {path: tree for path, tree in sources()}
         self.assertEqual([path for path, tree in found.items() if starts_programs(tree)], ["zoorik/system/process.py"])
         self.assertEqual([path for path, tree in found.items() if makes_http_calls(tree)], ["zoorik/pricing/http.py"])
         self.assertEqual(
             [path for path, tree in found.items() if builds_cloud_commands(tree)],
             ["zoorik/cloud/aws.py", "zoorik/cloud/azure.py"],
+        )
+        self.assertEqual(
+            [path for path, tree in found.items() if builds_kubectl_commands(tree)], ["zoorik/kubectl/direct.py"]
         )
 
     def test_catch_alls_are_counted(self) -> None:

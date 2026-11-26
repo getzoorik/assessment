@@ -7,9 +7,9 @@ import os
 import threading
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
-from tests.replay.redact import Redactor
+from tests.replay.redact import Redactor, pod_page
 from zoorik.errors import AssessmentError
 from zoorik.system.clock import Clock
 from zoorik.system.env import EnvFacts
@@ -168,6 +168,24 @@ class Recorder:
         """Keep one y/N answer."""
         with self._lock:
             self.recording.answers.append(answer)
+
+    def finished(self) -> Recording:
+        """Give the recording with each cluster's pod pages narrowed together to the labels the readers keep.
+
+        One page can't tell which labels a placement term of a pod on another page uses, so this waits for the end
+        of the run. The cluster of a page is its kubeconfig.
+        """
+        pages: Dict[str, List[Tuple[int, Completed]]] = {}
+        for index, call in enumerate(self.recording.calls):
+            if call.argv[0] == "kubectl" and isinstance(call.outcome, Completed) and pod_page(call.outcome.stdout):
+                cluster = call.argv[call.argv.index("--kubeconfig") + 1]
+                pages.setdefault(cluster, []).append((index, call.outcome))
+        calls = list(self.recording.calls)
+        for found in pages.values():
+            narrowed = self._redactor.narrow_pod_pages([completed.stdout for _, completed in found])
+            for (index, completed), text in zip(found, narrowed):
+                calls[index] = dataclasses.replace(calls[index], outcome=dataclasses.replace(completed, stdout=text))
+        return dataclasses.replace(self.recording, calls=calls)
 
 
 class RecordingRunner:

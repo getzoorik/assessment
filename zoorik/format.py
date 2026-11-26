@@ -6,6 +6,7 @@ import math
 # tiny addition carries it past that noise before rounding.
 CARRY = 1e-9
 MIB_PER_GIB = 1024
+SECONDS_PER_MINUTE = 60
 
 
 def half_up(value: float) -> int:

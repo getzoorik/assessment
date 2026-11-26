@@ -1,25 +1,29 @@
-"""What a recording may keep: kubectl JSON only through its allowlist, and of a kubeconfig only one fact."""
+"""What a recording may keep: kubectl JSON only through the package's allowlist, and of a kubeconfig only one fact."""
 
 import json
-from typing import Literal, Mapping, Sequence, Union
+from typing import Dict, List, Sequence
 
-# True keeps a value whole; a mapping keeps only its keys, each by its own rule. A list takes its rule for each item.
-Keep = Union[Literal[True], Mapping[str, "Keep"]]
+from zoorik.cloud.fields import Record
+from zoorik.kubectl.objects import (
+    KINDS,
+    PODS,
+    WHOLE,
+    Fields,
+    Json,
+    Kind,
+    placement_label_keys,
+    read_pod,
+    slim,
+    slim_page,
+)
+
+# Of the version check, a recording keeps only the version.
+VERSION = Fields({"gitVersion": WHOLE})
+LISTS: Dict[str, Kind] = {kind.list_kind: kind for kind in KINDS}
 
 
 class UnredactedOutput(Exception):
-    """A kubectl answer of a kind with no allowlist, which can't be recorded without risking private data."""
-
-
-def prune(value: object, keep: Keep) -> object:
-    """Keep only the parts of value that keep allows; a value not shaped as the rule expects becomes null."""
-    if keep is True:
-        return value
-    if isinstance(value, list):
-        return [prune(item, keep) for item in value]
-    if isinstance(value, dict):
-        return {key: prune(value[key], rule) for key, rule in keep.items() if key in value}
-    return None
+    """A kubectl answer with no allowlist, which can't be recorded without risking private data."""
 
 
 def kubeconfig(text: str) -> str:
@@ -29,24 +33,61 @@ def kubeconfig(text: str) -> str:
     return "# kubeconfig redacted while recording\n"
 
 
+def page_document(kind: Kind, items: Sequence[Json], token: str = "") -> Dict[str, object]:
+    """Write a page of kind's list as the API does, holding only items and, when there is a next page, its token."""
+    document: Dict[str, object] = {"kind": kind.list_kind, "items": list(items)}
+    if token:
+        document["metadata"] = {"continue": token}
+    return document
+
+
+def pod_page(text: str) -> bool:
+    """Tell whether recorded kubectl output is a page of pods."""
+    return text.startswith("{") and json.loads(text).get("kind") == PODS.list_kind
+
+
+def narrow_pod_items(items: Sequence[Json]) -> List[Json]:
+    """Keep of each kept pod's labels only those whose keys a required placement term of one of these pods uses."""
+    keys = placement_label_keys([read_pod(Record(item, f"pods[{index}]")) for index, item in enumerate(items)])
+    narrowed: List[Json] = []
+    for item in items:
+        labels = item["metadata"].get("labels")
+        if labels is None:
+            narrowed.append(item)
+        else:
+            kept = {key: value for key, value in labels.items() if key in keys}
+            narrowed.append({**item, "metadata": {**item["metadata"], "labels": kept}})
+    return narrowed
+
+
 class Redactor:
     """Redacts each answer before it reaches a recording."""
 
-    def __init__(self, kubectl_lists: Mapping[str, Keep]) -> None:
-        """Keep kubectl JSON by the allowlist for its kind, such as NodeList or PodList."""
-        self._lists = kubectl_lists
-
     def output(self, argv: Sequence[str], text: str) -> str:
-        """Give the part of a program's output that may be recorded: kubectl JSON pruned, anything else whole."""
+        """Give the part of a program's output that may be recorded: kubectl JSON slimmed, anything else whole."""
         if argv[0] != "kubectl" or not text.lstrip().startswith("{"):
             return text
         document = json.loads(text)
-        kind = document.get("kind")
-        if kind not in self._lists:
-            # Without an allowlist nothing says which fields are safe, so nothing is recorded.
-            raise UnredactedOutput(f"no allowlist for kubectl answers of kind {kind}")
-        return json.dumps(prune(document, self._lists[kind]), sort_keys=True)
+        kind = LISTS.get(document.get("kind"))
+        if kind is not None:
+            page = slim_page(document, kind)
+            return json.dumps(page_document(kind, page.items, page.token or ""), sort_keys=True)
+        if argv[-1] == "/version":
+            return json.dumps(slim(document, VERSION, "version"), sort_keys=True)
+        # Without an allowlist nothing says which fields are safe, so nothing is recorded.
+        raise UnredactedOutput(f"no allowlist for kubectl answers of kind {document.get('kind')}")
 
     def written(self, text: str) -> str:
         """Give the part of a file a program wrote that may be recorded; the only such files are kubeconfigs."""
         return kubeconfig(text)
+
+    def narrow_pod_pages(self, pages: Sequence[str]) -> List[str]:
+        """Narrow one cluster's recorded pod pages, together, to the labels the readers keep."""
+        documents = [json.loads(page) for page in pages]
+        items = narrow_pod_items([item for document in documents for item in document["items"]])
+        narrowed: List[str] = []
+        for document in documents:
+            count = len(document["items"])
+            narrowed.append(json.dumps({**document, "items": items[:count]}, sort_keys=True))
+            items = items[count:]
+        return narrowed

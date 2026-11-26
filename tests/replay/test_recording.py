@@ -8,20 +8,31 @@ import stat
 import sys
 import tempfile
 import unittest
-from typing import List, Mapping, Sequence
+from typing import Deque, Dict, List, Mapping, Optional, Sequence
 
+from tests.replay.clusters import SPREAD, container, pod
 from tests.replay.fake_cloud import FakeRun
-from tests.replay.recording import REPO, Failure, Recorder, RecordingRefused, call_key, load, refuse_inside, save
-from tests.replay.redact import Keep, Redactor
+from tests.replay.recording import (
+    REPO,
+    Call,
+    Failure,
+    Recorder,
+    RecordingRefused,
+    call_key,
+    load,
+    refuse_inside,
+    save,
+)
+from tests.replay.redact import Redactor
 from tests.replay.replay import ReplayHttp, ReplayPrompt, ReplayRunner
 from tests.replay.scenarios import FACTS
 from zoorik.errors import NotSignedIn
+from zoorik.kubectl.objects import Json
 from zoorik.system.clock import Clock
 from zoorik.system.process import Completed
 from zoorik.system.runtime import Runtime
 
 PRICES = "https://prices.example.test/api/retail/prices?$filter=one"
-NODE_LIST: Keep = {"kind": True, "items": {"metadata": {"name": True}}}
 NODES = {"kind": "NodeList", "items": [{"metadata": {"name": "node-one", "annotations": {"note": "private-note"}}}]}
 KUBECONFIG = (
     "clusters:\n- cluster:\n    server: https://one.example.test\nusers:\n- user:\n    exec: {command: kubelogin}\n"
@@ -102,7 +113,7 @@ class RecordingTest(unittest.TestCase):
         self.recorder = Recorder(
             ["assess"],
             real.runtime(self.real_runner, ScriptedHttp(), ScriptedPrompt()),
-            Redactor({"NodeList": NODE_LIST}),
+            Redactor(),
         )
         self.real_answers = run_sample(self.recorder.runtime)
 
@@ -193,6 +204,66 @@ class RecordingTest(unittest.TestCase):
             save(self.recorder.recording, path)
         with open(path, encoding="utf-8") as file:
             self.assertEqual(file.read(), "kept")
+
+
+def pod_page_text(items: List[Json], token: str = "") -> str:
+    """Write a page of pods as the API server gives it."""
+    return json.dumps({"kind": "PodList", "apiVersion": "v1", "metadata": {"continue": token}, "items": items})
+
+
+def labels_in(call: Call) -> Json:
+    """Give the labels of the one pod on a recorded page."""
+    assert isinstance(call.outcome, Completed)
+    return json.loads(call.outcome.stdout)["items"][0]["metadata"]["labels"]
+
+
+class PodPagesRunner:
+    """Stands in for kubectl: answers each cluster's pod lists from its pages, in order."""
+
+    def __init__(self, pages: Mapping[str, List[str]]) -> None:
+        """Answer with each cluster's pages, by its kubeconfig's file name."""
+        self._pages: Dict[str, Deque[str]] = {name: collections.deque(texts) for name, texts in pages.items()}
+
+    def run(self, argv: Sequence[str], timeout: float, overrides: Mapping[str, str]) -> Completed:
+        """Give the next page of argv's cluster."""
+        name = os.path.basename(argv[list(argv).index("--kubeconfig") + 1])
+        return Completed(0, self._pages[name].popleft(), "")
+
+    def end_children(self) -> None:
+        """End nothing: no program was started."""
+
+
+class FinishedTest(unittest.TestCase):
+    """Recorder.finished."""
+
+    def test_each_clusters_pod_pages_are_narrowed_together(self) -> None:
+        """A label that a term on one page uses stays on its cluster's other page, and goes in another cluster."""
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        labels = {"app": "web", "team": "one"}
+        spread = {"topologySpreadConstraints": [SPREAD]}
+        pages = {
+            "one.yaml": [
+                pod_page_text([pod("shop", "web-one", "node-one", [container("app")], labels=labels)], "page1="),
+                pod_page_text([pod("shop", "web-two", "node-one", [container("app")], labels=labels, spec=spread)]),
+            ],
+            "two.yaml": [pod_page_text([pod("shop", "web-three", "node-two", [container("app")], labels=labels)])],
+        }
+        run = FakeRun(FACTS, folder.name)
+        recorder = Recorder(
+            ["assess"], run.runtime(PodPagesRunner(pages), ScriptedHttp(), ScriptedPrompt()), Redactor()
+        )
+        token: Optional[str]
+        for name, token in (("one.yaml", None), ("one.yaml", "page1="), ("two.yaml", None)):
+            query = "limit=500" if token is None else f"limit=500&continue={token}"
+            kube = os.path.join(folder.name, "kube", name)
+            recorder.runtime.runner.run(
+                ["kubectl", "--kubeconfig", kube, "get", "--raw", f"/api/v1/pods?{query}"], 60, {}
+            )
+        self.assertEqual([labels_in(call) for call in recorder.recording.calls], [labels] * 3)
+        finished = recorder.finished()
+        self.assertEqual([labels_in(call) for call in finished.calls], [{"app": "web"}, {"app": "web"}, {}])
+        self.assertEqual([call.argv for call in finished.calls], [call.argv for call in recorder.recording.calls])
 
 
 class KeyTest(unittest.TestCase):

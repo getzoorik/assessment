@@ -90,6 +90,11 @@ def summary(output: str) -> str:
     return QUOTED.sub("...", ERROR_PREFIX.sub("", lines[0]))[:REASON_LENGTH]
 
 
+def reason_row(reasons: Sequence[Reason], text: str) -> Optional[Reason]:
+    """Find the first row of a reasons table whose pattern is in a CLI's error text."""
+    return next((row for row in reasons if re.search(row.pattern, text, re.IGNORECASE)), None)
+
+
 class CloudCli:
     """One cloud's CLI: every call ends with the output options and runs with the call's environment overrides.
 
@@ -154,7 +159,7 @@ class CloudCli:
 
     def _row(self, text: str) -> Optional[Reason]:
         """Find the first row of the reasons table whose pattern is in text."""
-        return next((row for row in self.tool.reasons if re.search(row.pattern, text, re.IGNORECASE)), None)
+        return reason_row(self.tool.reasons, text)
 
     def _arguments(self, argv: Sequence[str], files: List[str]) -> List[str]:
         """Give argv as the program gets it: on Windows, az values that cmd.exe would change go in files."""
