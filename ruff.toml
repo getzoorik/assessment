@@ -1,7 +1,5 @@
 target-version = "py38"
 line-length = 120
-# The root scripts and the old entry point keep today's form until the package replaces them.
-extend-exclude = ["k8s.py", "disks.py", "zoorik/__main__.py"]
 
 [lint]
 select = ["E", "W", "F", "I", "N", "D", "C90", "B", "UP", "SIM", "PL", "RUF"]

@@ -196,8 +196,16 @@ def skus(*sizes: Json) -> Call:
 
 def run_command_args(vm: str) -> List[str]:
     """Give the az arguments that run the disk part's command in a VM through Run Command."""
-    return ["vm", "run-command", "invoke", "--ids", vm_id(vm), "--command-id", "RunShellScript", "--scripts"] + [
-        GUEST_SCRIPT[AZURE]
+    return [
+        "vm",
+        "run-command",
+        "invoke",
+        "--ids",
+        vm_id(vm),
+        "--command-id",
+        "RunShellScript",
+        "--scripts",
+        GUEST_SCRIPT[AZURE],
     ]
 
 
@@ -468,7 +476,7 @@ def aws_scenario(name: str, calls: Sequence[Call], answers: Sequence[Optional[bo
 
 
 def linux_vm() -> DiskScenario:
-    """A Linux VM in zone 1 with a P30 and a P20 data disk, read after a yes: its pool goes on Premium SSD v2.
+    """Assess a Linux VM in zone 1 with a P30 and a P20 data disk, read after a yes: its pool goes on Premium SSD v2.
 
     Used: 200 + 50 = 250 GiB, so the pool holds 300 GiB: five 64 GiB members and the 8 GiB small one, 328 GB. The
     peak (600 IOPS, 34 MB/s) is below each member's free 3,000 IOPS and 125 MB/s, so each costs its GiB x 0.0001 x
@@ -489,7 +497,7 @@ def linux_vm() -> DiskScenario:
 
 
 def shared_disk() -> DiskScenario:
-    """A P20 shared by two VMs in no zone, one of which also has a P30 of its own.
+    """Assess a P20 shared by two VMs in no zone, one of which also has a P30 of its own.
 
     The shared disk stays as it is: the VM with only it has no pool, and the other VM's pool takes only its own disk.
     That pool goes on Premium SSD (Premium SSD v2 is not offered to a VM in no zone here): 100 GiB used needs 150, so
@@ -515,7 +523,7 @@ def shared_disk() -> DiskScenario:
 
 
 def priced_and_unpriced() -> DiskScenario:
-    """A VM with a P30, priced, and a Standard SSD, which the price list doesn't price: its cost today is the P30's."""
+    """Assess a VM with a priced P30 and a Standard SSD the price list doesn't price: its cost today is the P30's."""
     vm = vm_row("vm-one", [attached(0, "data-one", 1024), attached(1, "data-two", 1024, "StandardSSD_LRS")])
     disks = [disk_row("data-one", 1024, "P30"), disk_row("data-two", 1024, "E30", sku="StandardSSD_LRS")]
     printed = guest_output("L", [("0", ["/data"]), ("1", ["/archive"])], {"/data": 100, "/archive": 300}, AZURE_KERNEL)
@@ -530,13 +538,13 @@ def priced_and_unpriced() -> DiskScenario:
 
 
 def windows() -> DiskScenario:
-    """A Windows VM with a data disk: not estimated, and not read inside, so nothing is asked."""
+    """Assess a Windows VM with a data disk: not estimated, and not read inside, so nothing is asked."""
     vm = vm_row("vm-windows", [attached(0, "data-one", 512)], osType="Windows")
     return azure_scenario("windows", [*azure_inventory([vm], [disk_row("data-one", 512, "P20")]), skus()])
 
 
 def managed_group() -> DiskScenario:
-    """A VM in a resource group that another Azure service (a Databricks workspace) runs: left to that service."""
+    """Assess a VM in a resource group another Azure service (a Databricks workspace) runs: left to that service."""
     group = "databricks-group-one"
     vm = vm_row("vm-workers", [attached(0, "data-one", 512)], resourceGroup=group)
     managed: Json = {
@@ -549,7 +557,7 @@ def managed_group() -> DiskScenario:
 
 
 def aks_node() -> DiskScenario:
-    """A node VM of an AKS cluster, in the group the cluster runs: left out. A stopped VM beside it stays, unread."""
+    """Leave out a node VM of an AKS cluster, in the group the cluster runs. A stopped VM beside it stays, unread."""
     group = "mc_group-one_cluster-one_westeurope"
     node = vm_row("vm-node", [attached(0, "data-node", 512)], resourceGroup=group)
     stopped = vm_row("vm-one", [attached(0, "data-one", 512)], power="PowerState/deallocated")
@@ -560,7 +568,7 @@ def aks_node() -> DiskScenario:
 
 
 def managed_groups_failed() -> DiskScenario:
-    """The read of managed resource groups is refused: no VM can be told apart from a cluster node, so none is assessed."""
+    """Refuse the read of managed resource groups: no VM can be told apart from a cluster node, so none is assessed."""
     vms = [vm_row("vm-one", [attached(0, "data-one", 512)]), vm_row("vm-two", [attached(0, "data-two", 512)])]
     disks = [disk_row("data-one", 512, "P20"), disk_row("data-two", 512, "P20")]
     refused = (
@@ -575,7 +583,7 @@ def managed_groups_failed() -> DiskScenario:
 
 
 def missing_disk_record() -> DiskScenario:
-    """A VM whose second managed disk has no record: named, and left out of the figures. Its pool takes the P30.
+    """Assess a VM whose second managed disk has no record: named, and left out of the figures. Its pool takes the P30.
 
     Used: 100 GiB, so the pool holds 150 GiB: three 64 GiB members and the 8 GiB small one on Premium SSD v2, 200 GB,
     at 3 x 4.67 + 0.58 = 14.59, against the P30's 130: a saving of 115.41.
@@ -592,19 +600,19 @@ def missing_disk_record() -> DiskScenario:
 
 
 def too_few_slots() -> DiskScenario:
-    """A VM whose size takes 4 data disks: a pool needs 8 slots or more, so it is not read inside."""
+    """Assess a VM whose size takes 4 data disks: a pool needs 8 slots or more, so it is not read inside."""
     vm = vm_row("vm-small", [attached(0, "data-one", 512)], size="Standard_D2s_v5")
     return azure_scenario("too-few-slots", [*azure_inventory([vm], [disk_row("data-one", 512, "P20")]), skus(D2S)])
 
 
 def declined() -> DiskScenario:
-    """A Linux VM with a data disk, and "no" at the prompt: nothing is read inside it."""
+    """Assess a Linux VM with a data disk, and "no" at the prompt: nothing is read inside it."""
     vm = vm_row("vm-one", [attached(0, "data-one", 1024)])
     return azure_scenario("declined", [*azure_inventory([vm], [disk_row("data-one", 1024, "P30")]), skus()], (False,))
 
 
 def hour_without_maximum() -> DiskScenario:
-    """A disk with an hour that has no Maximum, only an Average far above the other hour: that hour is left out.
+    """Assess a disk with an hour that has no Maximum, only an Average far above the other hour: that hour is left out.
 
     The pool is sized on the other hour: the VM is in no zone, so on Premium SSD, three 128 GiB members at P10's 20,
     60 in all, against the P30's 130: a saving of 70.
@@ -641,7 +649,7 @@ def malformed_vm() -> DiskScenario:
 
 
 def eks_node_tags() -> DiskScenario:
-    """An EKS node for each tag that names its cluster: all left out. A stopped instance beside them stays, unread."""
+    """Leave out an EKS node for each tag that names its cluster. A stopped instance beside them stays, unread."""
     eks = [
         instance(1, "m6i.2xlarge", [("/dev/sdf", "vol-01")], {"eks:cluster-name": "cluster-one"}),
         instance(2, "m6i.2xlarge", [("/dev/sdf", "vol-02")], {"eks:eks-cluster-name": "cluster-one"}),
@@ -661,7 +669,7 @@ def eks_node_tags() -> DiskScenario:
 
 
 def self_managed_node() -> DiskScenario:
-    """A node of a self-managed cluster that isn't EKS: kept, read after a yes, and its pool goes on gp3.
+    """Assess a node of a self-managed cluster that isn't EKS: kept, read after a yes, and its pool goes on gp3.
 
     Used: 100 GiB, held at 115 GiB (103 GiB with btrfs's 3%, at most 90% full), on two gp3 volumes of 58 GiB at their
     free 3,000 IOPS and 125 MiB/s: 2 x 58 x 0.08 = 9.28, against the gp2's 500 x 0.10 = 50: a saving of 40.72.
@@ -681,7 +689,7 @@ def self_managed_node() -> DiskScenario:
 
 
 def eks_list_failed() -> DiskScenario:
-    """The EKS cluster list of one region is refused: its instance tagged as a cluster's node is named, not assessed."""
+    """Refuse one region's EKS cluster list: its instance tagged as a cluster's node is named, not assessed."""
     node = instance(1, "m6i.2xlarge", [("/dev/sdf", "vol-01")], {"kubernetes.io/cluster/cluster-two": "owned"})
     refused = (
         "An error occurred (AccessDeniedException) when calling the ListClusters operation: User is not authorized "
@@ -696,7 +704,7 @@ def eks_list_failed() -> DiskScenario:
 
 
 def no_terminal() -> DiskScenario:
-    """An instance Systems Manager reaches, with no terminal to ask on: nothing is read inside it."""
+    """Assess an instance Systems Manager reaches, with no terminal to ask on: nothing is read inside it."""
     item = instance(1, "m6i.2xlarge", [("/dev/sdf", "vol-01")])
     calls = [
         *region_reads(EU, [item], [root_volume(1), volume("vol-01", "gp2", 500, 1500)]),
@@ -708,7 +716,7 @@ def no_terminal() -> DiskScenario:
 
 
 def ebs_types() -> DiskScenario:
-    """An instance with a gp2, a gp3 and an io1 data volume, read after a yes: its pool goes on gp3.
+    """Assess an instance with a gp2, a gp3 and an io1 data volume, read after a yes: its pool goes on gp3.
 
     Used: 100 + 200 + 140 = 440 GiB, held at 504 GiB, on two gp3 volumes of 252 GiB. The peak of 255 MB/s
     (243.2 MiB/s) x 1.3 shared by two is 159 MiB/s each, held to 156 by the type's 312 MiB/s; at 3,000 IOPS each
@@ -738,7 +746,7 @@ def ebs_types() -> DiskScenario:
 
 
 def xen_type() -> DiskScenario:
-    """An instance of a Xen type: a pool needs a Nitro type, so it is not read inside."""
+    """Assess an instance of a Xen type: a pool needs a Nitro type, so it is not read inside."""
     item = instance(1, "m4.xlarge", [("/dev/sdf", "vol-01")])
     calls = [
         *region_reads(EU, [item], [root_volume(1), volume("vol-01", "gp2", 500, 1500)]),
@@ -750,7 +758,7 @@ def xen_type() -> DiskScenario:
 
 
 def no_ssm() -> DiskScenario:
-    """An instance Systems Manager doesn't manage: the run can't read inside it, so nothing is asked."""
+    """Assess an instance Systems Manager doesn't manage: the run can't read inside it, so nothing is asked."""
     item = instance(1, "m6i.2xlarge", [("/dev/sdf", "vol-01")])
     calls = [
         *region_reads(EU, [item], [root_volume(1), volume("vol-01", "gp2", 500, 1500)]),

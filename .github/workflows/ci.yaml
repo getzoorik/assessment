@@ -9,8 +9,8 @@ permissions:
   contents: read
 
 jobs:
-  scripts:
-    name: Scripts on ${{ matrix.os }}, Python ${{ matrix.python }}
+  package:
+    name: Package on ${{ matrix.os }}, Python ${{ matrix.python }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -23,22 +23,6 @@ jobs:
     defaults:
       run:
         shell: bash
-    env:
-      # python -c "$PDF_CHECK" FOLDER checks that the one report in $RUNNER_TEMP/FOLDER is a whole PDF: its header, its
-      # end, a cross-reference table in which every object's offset points at that object, and page contents whose
-      # length is right and which decompress.
-      PDF_CHECK: >-
-        import glob, os, re, sys, zlib;
-        [f] = glob.glob(os.path.join(os.environ['RUNNER_TEMP'], sys.argv[1], '*.pdf'));
-        d = open(f, 'rb').read();
-        assert d.startswith(b'%PDF-') and d.rstrip().endswith(b'%%EOF'), f;
-        x = int(re.findall(rb'startxref\s+(\d+)', d)[-1]);
-        t = re.match(rb'xref\s+0 (\d+)\s+', d[x:]);
-        e = re.findall(rb'(\d{10}) \d{5} ([fn])', d[x + t.end():])[:int(t.group(1))];
-        assert len(e) == int(t.group(1)) and all(d.startswith(b'%d 0 obj' % i, int(o)) for i, (o, k) in enumerate(e) if k == b'n'), f;
-        s = [(m.end(), int(m.group(1))) for m in re.finditer(rb'/Length (\d+) /Filter /FlateDecode >>\nstream\n', d)];
-        assert s and all(d.startswith(b'\nendstream', i + n) and zlib.decompress(d[i:i + n]) for i, n in s), f;
-        print(f, len(d), 'bytes,', len(e) - 1, 'objects,', len(s), 'pages')
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -48,44 +32,34 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Unit tests and replays
         run: python -m unittest discover -s tests -t .
-      - name: Compile both scripts
-        run: python -m py_compile k8s.py disks.py
-      - name: Both scripts print their help and version
-        run: |
-          python k8s.py --help
-          python k8s.py --version
-          python disks.py --help
-          python disks.py --version
-      - name: k8s.py writes a report when it can't reach a cluster
-        run: |
-          python k8s.py --context no-such-context --no-prices --sample-minutes 0 --out "$RUNNER_TEMP/report/"
-          python -c "$PDF_CHECK" report
-      - name: The zoorik package installs, and zoorik assess coral writes the same report
+      - name: The package installs, and its command prints its help and version
         run: |
           python -m pip install .
+          zoorik --help
           zoorik --version
-          zoorik assess coral --version
-          zoorik assess amoeba --version
-          zoorik k8s --version
-          zoorik assess coral --context no-such-context --no-prices --sample-minutes 0 --out "$RUNNER_TEMP/package-report/"
-          python -c "$PDF_CHECK" package-report
-      - name: disks.py stops with a clear message when neither az nor aws is installed
+          zoorik assess --help
+      # PATH holds only Python's folder, so neither az nor aws is found. On Windows the console script sits in Scripts,
+      # outside that folder, so the run starts as python -I -m zoorik.cli.
+      - name: Without az and aws, the run says what it needs and writes nothing
         run: |
-          if PATH="$(dirname "$(command -v python)")" python disks.py < /dev/null > disks.out; then exit 1; fi
-          cat disks.out
-          grep -q "This needs the Azure CLI (az) or the AWS CLI (aws)" disks.out
+          code=0
+          PATH="$(dirname "$(command -v python)")" python -I -m zoorik.cli assess --sample-minutes 0 --out "$RUNNER_TEMP/out" > nocli.out 2>&1 || code=$?
+          cat nocli.out
+          test "$code" -eq 0
+          test "$(tr -d '\r' < nocli.out)" = "This needs the Azure CLI (az) or the AWS CLI (aws), signed in. Open Azure Cloud Shell (shell.azure.com) or AWS CloudShell and run it there."
+          test -z "$(ls -A "$RUNNER_TEMP/out")"
       # The Linux and Windows runners have az and aws installed but not signed in. On Windows az is az.cmd, so a
-      # sign-in message (not "not installed") shows that both scripts find it there.
-      - name: Where az and aws are installed but not signed in, both scripts say to sign in
+      # sign-in message (not "not installed") shows that the run finds it there.
+      - name: Where az and aws are not signed in, the run says to sign in and writes nothing
         if: runner.os != 'macOS'
         run: |
-          if python disks.py < /dev/null > disks.out; then exit 1; fi
-          cat disks.out
-          grep -q "Azure: not signed in to Azure; run az login" disks.out
-          grep -q "AWS: no AWS credentials" disks.out
-          if python k8s.py --discover azure --no-prices --sample-minutes 0 --out "$RUNNER_TEMP/discover/" > k8s.out; then exit 1; fi
-          cat k8s.out
-          grep -q "Azure: could not list clusters: not signed in to Azure; run az login" k8s.out
+          code=0
+          zoorik assess --sample-minutes 0 --out "$RUNNER_TEMP/signed-out" < /dev/null > signed-out.out 2>&1 || code=$?
+          cat signed-out.out
+          test "$code" -eq 1
+          tr -d '\r' < signed-out.out | grep -qx "Azure: not signed in to Azure; run az login"
+          tr -d '\r' < signed-out.out | grep -qx "AWS: no AWS credentials; run aws configure or aws sso login"
+          test -z "$(ls -A "$RUNNER_TEMP/signed-out")"
 
   npm:
     name: npx zoorik on ${{ matrix.os }}
@@ -104,16 +78,40 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "18"
-      - name: The npm package holds only its launcher, and the launcher runs the PyPI package
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.x"
+      - name: The npm package holds only its launcher
         working-directory: npm
+        run: npm pack --dry-run --json | node -e "const f=JSON.parse(require('fs').readFileSync(0))[0].files.map(x=>x.path).sort().join(' '); if (f !== 'LICENSE README.md bin/zoorik.js package.json') { console.error(f); process.exit(1) }"
+      - name: Build the wheel
         run: |
-          npm pack --dry-run --json | node -e "const f=JSON.parse(require('fs').readFileSync(0))[0].files.map(x=>x.path).sort().join(' '); if (f !== 'LICENSE README.md bin/zoorik.js package.json') { console.error(f); process.exit(1) }"
-          node bin/zoorik.js --version | grep -E '^zoorik [0-9]'
-      - name: npx runs the packed launcher
+          python -m pip install build==1.6.1
+          python -m build --wheel --outdir "$RUNNER_TEMP/dist" .
+      # Each run starts from nothing, in a home of its own: Node takes the home from USERPROFILE on Windows and from HOME
+      # elsewhere, and the launcher makes its Python environment there. pip installs only from the wheel just built; it
+      # reads PIP_* even under -I.
+      - name: The launcher installs its own version from the wheel and runs it
         working-directory: npm
+        env:
+          PIP_NO_INDEX: "1"
+          PIP_FIND_LINKS: ${{ runner.temp }}/dist
         run: |
-          npm pack
-          npx --yes --package "./zoorik-$(node -p "require('./package.json').version").tgz" zoorik --version | grep -E '^zoorik [0-9]'
+          version=$(node -p "require('./package.json').version")
+          HOME="$RUNNER_TEMP/home-launcher" USERPROFILE="$RUNNER_TEMP/home-launcher" node bin/zoorik.js --version > launcher.out
+          cat launcher.out
+          test "$(tr -d '\r' < launcher.out)" = "zoorik $version"
+      - name: npx runs the packed launcher the same way
+        working-directory: npm
+        env:
+          PIP_NO_INDEX: "1"
+          PIP_FIND_LINKS: ${{ runner.temp }}/dist
+        run: |
+          version=$(node -p "require('./package.json').version")
+          npm pack --pack-destination "$RUNNER_TEMP"
+          HOME="$RUNNER_TEMP/home-npx" USERPROFILE="$RUNNER_TEMP/home-npx" npx --yes --package "$RUNNER_TEMP/zoorik-$version.tgz" zoorik --version > npx.out
+          cat npx.out
+          test "$(tr -d '\r' < npx.out)" = "zoorik $version"
 
   lint:
     name: Lint

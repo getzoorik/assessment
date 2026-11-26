@@ -6,8 +6,6 @@ import unittest
 from typing import Callable, Iterator, List, Set, Tuple
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-# The old entry point keeps today's form until the package replaces it.
-LEGACY = ("zoorik/__main__.py",)
 CATCH_ALL = ("Exception", "BaseException")
 
 
@@ -18,7 +16,7 @@ def sources() -> Iterator[Tuple[str, ast.Module]]:
         for name in sorted(names):
             path = os.path.join(folder, name)
             relative = os.path.relpath(path, ROOT).replace(os.sep, "/")
-            if name.endswith(".py") and relative not in LEGACY:
+            if name.endswith(".py"):
                 with open(path, encoding="utf-8") as source:
                     yield relative, ast.parse(source.read(), relative)
 
