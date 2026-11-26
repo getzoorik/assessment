@@ -3,7 +3,7 @@
   "Cluster cluster-eks (eu-west-1): 7 nodes, 7 pods"
  ],
  "result": {
-  "after": 204,
+  "after": 58,
   "clusters": [
    {
     "bare_pods": 0,
@@ -40,21 +40,9 @@
       "today": 1
      },
      {
-      "after": 1,
+      "after": 0,
       "capacity": "regular",
-      "cost_after": 73,
-      "cost_today": 0,
-      "hourly": 0.1,
-      "kind": "NodePool",
-      "machine_type": "m6i.large",
-      "note": "",
-      "pool": "burst",
-      "today": 0
-     },
-     {
-      "after": 1,
-      "capacity": "regular",
-      "cost_after": 73,
+      "cost_after": 0,
       "cost_today": 146,
       "hourly": 0.1,
       "kind": "node group",
@@ -82,19 +70,25 @@
       "after": 379,
       "before": 379,
       "name": "Smaller pods",
-      "row": "smaller pods and spare machines"
+      "row": "smaller pods and spare machines (packing included)"
      },
      {
       "after": 277,
       "before": 379,
       "name": "Spare machines",
-      "row": "smaller pods and spare machines"
+      "row": "smaller pods and spare machines (packing included)"
      },
      {
       "after": 204,
       "before": 277,
       "name": "Cheaper machine types",
       "row": "cheaper machine types"
+     },
+     {
+      "after": 58,
+      "before": 204,
+      "name": "Packing across pools",
+      "row": "smaller pods and spare machines (packing included)"
      }
     ],
     "usage": null,
@@ -127,7 +121,7 @@
       "name": "web",
       "namespace": "shop",
       "raised": false,
-      "share": 62
+      "share": 150
      },
      {
       "cpu": 480,
@@ -137,13 +131,13 @@
       "name": "worker",
       "namespace": "shop",
       "raised": false,
-      "share": 40
+      "share": 98
      }
     ]
    }
   ],
   "not_assessed": [],
-  "saving": 175,
+  "saving": 321,
   "subscriptions": {},
   "today": 379,
   "unread": []

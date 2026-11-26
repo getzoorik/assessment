@@ -51,7 +51,7 @@ class PageOneTest(unittest.TestCase):
         """A private cluster that saves nothing beside a VM that saves: disks alone; with the public one: all three."""
         self.assertEqual(saved_by(summary(clusters_of("aks-private"), disks_of("linux-vm")).rows), "disks")
         every = saved_by(summary(clusters_of("aks-public"), disks_of("linux-vm")).rows)
-        self.assertEqual(every, "smaller pods and spare machines, cheaper machine types, and disks")
+        self.assertEqual(every, "smaller pods and spare machines (packing included), cheaper machine types, and disks")
 
 
 class KubernetesRowsTest(unittest.TestCase):

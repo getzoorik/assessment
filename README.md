@@ -267,10 +267,18 @@ Each cluster's saving is worked out in steps. Each step works on what the step b
 - A pool on spot today is compared at spot prices.
 - The run doesn't read your vCPU quotas: a cheaper type may need a quota increase first.
 
+**Step 4, packing across pools.** A pod may move to any pool where Kubernetes would let it run, by step 2's rules. The cluster's pods are packed onto as few machines as hold them, the machines that give the most room for their price first.
+- Each pool keeps the machine types step 3 left it. A pool can take new machines of each of its types in each zone where it has that type. A new machine has the labels and taints that the pool's machines of that type in that zone all share.
+- A pool on spot today takes pods only into room on its machines, so it gains no machine.
+- A pool with a machine that has no list price takes no part: its pods stay, and it takes none.
+- A pod that fits no empty machine stays on its machine.
+- An AKS system pool keeps at least 1 machine. Any other pool may reach 0.
+- A packing that doesn't make the cluster cost less is not applied.
+
 **Costs.**
 - A line (a pool's machines of one type, regular or spot) costs its machines' hourly list price × 730 hours, rounded to whole dollars. A line with no list price counts in no total, and the report names it with the reason.
 - A step that would cost more than the state before it is not applied. So no step is negative, and the steps add up exactly to the cost today less the cost after.
-- The workload table splits the saving of smaller pods and spare machines by the CPU and memory each workload frees. A raised workload frees nothing. The shares add up to that saving exactly, and are never added on top of it.
+- The workload table splits the saving of smaller pods and spare machines, packing included (steps 1, 2 and 4), by the CPU and memory each workload frees. A raised workload frees nothing. The shares add up to that saving exactly, and are never added on top of it.
 
 **Prices** are USD list prices:
 - **Azure:** for each machine type in its region, the cheapest Linux pay-as-you-go price above zero, or its Spot price for a pool on Spot today;

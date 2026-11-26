@@ -49,7 +49,7 @@ def spare(state: ClusterState, pool: Pool) -> ClusterState:
     overhead = overheads(state)
     names = {machine.name for machine in machines}
     pods = [pod for pod in state.pods if pod.node in names and not pod.overhead]
-    staying = {pod.key for pod in pods if pod.stays is not None or not fits_empty(pod, machines, overhead[pool.id])}
+    staying = {pod.key for pod in pods if pod.stays is not None or not fits_empty(pod, machines, overhead)}
     moving = tuple(pod for pod in pods if pod.key not in staying)
     kept = {pod.node for pod in pods if pod.key in staying}
     candidates = rank(pool, [machine for machine in machines if machine.name not in kept], moving, overhead[pool.id])
@@ -82,9 +82,9 @@ def spare(state: ClusterState, pool: Pool) -> ClusterState:
     )
 
 
-def fits_empty(pod: Pod, machines: Sequence[Machine], overhead: Overhead) -> bool:
-    """Tell whether the pod fits an empty machine of its pool, by the rules that need no other pod."""
-    return any(fits_machine(pod, machine, empty_room(machine, overhead)) for machine in machines)
+def fits_empty(pod: Pod, machines: Sequence[Machine], overhead: Mapping[str, Overhead]) -> bool:
+    """Tell whether the pod fits one of machines when empty, by the rules that need no other pod."""
+    return any(fits_machine(pod, machine, empty_room(machine, overhead[machine.pool])) for machine in machines)
 
 
 def rank(pool: Pool, machines: Sequence[Machine], pods: Sequence[Pod], overhead: Overhead) -> Tuple[Machine, ...]:

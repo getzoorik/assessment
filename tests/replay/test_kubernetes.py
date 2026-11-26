@@ -95,7 +95,10 @@ class WorkedFigureTest(unittest.TestCase):
     """The figure the plan works out by hand, on a cluster read with kubectl."""
 
     def test_a_public_cluster_goes_from_730_to_438_split_134_and_158_then_to_372(self) -> None:
-        """Step 1 saves $0, step 2 $292 split $134 and $158, and step 3 $66: the System pool's three on F4s v2."""
+        """Step 1 saves $0, step 2 $292 split $134 and $158, step 3 $66: the System pool's three on F4s v2.
+
+        Step 4 saves $0, since the cluster's one pool holds its pods on as few machines as it can already.
+        """
         cluster = only_cluster("aks-public")
         figures = [(step.name, step.before, step.after, step.saving) for step in cluster.steps]
         self.assertEqual(
@@ -104,6 +107,7 @@ class WorkedFigureTest(unittest.TestCase):
                 ("Smaller pods", 730, 730, 0),
                 ("Spare machines", 730, 438, 292),
                 ("Cheaper machine types", 438, 372, 66),
+                ("Packing across pools", 372, 372, 0),
             ],
         )
         lines = [(line.machine_type, line.today, line.after, line.cost_after) for line in cluster.lines]
@@ -116,8 +120,8 @@ class WorkedFigureTest(unittest.TestCase):
         for name in ("aks-private", "aks-authorized-ranges"):
             with self.subTest(name):
                 cluster = only_cluster(name)
-                self.assertEqual(cluster.steps[-1].name, "Cheaper machine types")
-                self.assertEqual(cluster.steps[-1].saving, 0)
+                step_3 = cluster.steps[2]
+                self.assertEqual((step_3.name, step_3.saving), ("Cheaper machine types", 0))
                 reason = "the allocatable memory of its Standard_D4s_v5 nodes doesn't follow the platform's reservation"
                 self.assertEqual(cluster.cheaper_types, reason)
 
@@ -170,7 +174,9 @@ class NodeKindsTest(unittest.TestCase):
     def test_each_kind_is_a_pool_and_fargate_is_not_a_machine(self) -> None:
         """Spot lines take the zones' average spot price; each node group drops a machine, and burst moves to m6i.large.
 
-        The spot pools stay on m6i.large, the cheapest type that holds their pods at spot prices too.
+        The spot pools stay on m6i.large, the cheapest type that holds their pods at spot prices too. Then every pod
+        fits the room of the two spot machines, the cheapest per share: burst and apps-on-demand go, and neither spot
+        pool gains a machine. Burst's m6i.large, which step 3 added and step 4 emptied, is no line.
         """
         cluster = only_cluster("eks-node-kinds")
         lines = [
@@ -182,13 +188,12 @@ class NodeKindsTest(unittest.TestCase):
             [
                 ("Auto Scaling group", "workers-self", "m6i.large", "spot", 0.04, 1, 1),
                 ("NodePool", "burst", "m6i.xlarge", "regular", 0.2, 1, 0),
-                ("NodePool", "burst", "m6i.large", "regular", 0.1, 0, 1),
-                ("node group", "apps-on-demand", "m6i.large", "regular", 0.1, 2, 1),
+                ("node group", "apps-on-demand", "m6i.large", "regular", 0.1, 2, 0),
                 ("node group", "apps-spot", "m6i.large", "spot", 0.04, 2, 1),
             ],
         )
         figures = [(step.name, step.before, step.after) for step in cluster.steps]
-        self.assertEqual(figures[-1], ("Cheaper machine types", 277, 204))
-        self.assertEqual((cluster.today, cluster.after, cluster.not_machines), (379, 204, 1))
+        self.assertEqual(figures[-2:], [("Cheaper machine types", 277, 204), ("Packing across pools", 204, 58)])
+        self.assertEqual((cluster.today, cluster.after, cluster.not_machines), (379, 58, 1))
         shares = {each.name: each.share for each in cluster.workloads}
-        self.assertEqual(shares, {"report": 0, "tools": 0, "web": 62, "worker": 40})
+        self.assertEqual(shares, {"report": 0, "tools": 0, "web": 150, "worker": 98})

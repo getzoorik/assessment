@@ -11,8 +11,8 @@ from zoorik.format import half_up
 from zoorik.kubernetes.model import ClusterState, Pool, StepResult
 from zoorik.pricing.machines import HOURS_PER_MONTH
 
-# The page-1 row the smaller-pods and spare-machines steps count in, and whose saving the workload table splits.
-SHARED_ROW = "smaller pods and spare machines"
+# The page-1 row smaller pods, spare machines and packing across pools count in, whose saving the workload table splits.
+SHARED_ROW = "smaller pods and spare machines (packing included)"
 
 
 class Step(Protocol):

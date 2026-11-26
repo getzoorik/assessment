@@ -312,8 +312,8 @@ def aks_public(window: SampleWindow = WINDOW, others: Sequence[Json] = ()) -> Ku
     Each pod asks 910m and 1300 MiB after step 1, so four fit a machine and the twelve need three; the System pool keeps
     three of its five machines, below its autoscaler's minimum of five. A frees 2000m and 4096 MiB and B 1000m and
     12288 MiB, so A's share is $134 and B's $158. Step 3: an F4s v2 gives pods 3860m and 5857 MiB, so four fit one
-    and the twelve need three F4s v2 at $0.17 an hour: $372, a saving of $66. The subscription's other clusters are
-    others.
+    and the twelve need three F4s v2 at $0.17 an hour: $372, a saving of $66. Step 4 saves nothing, with one pool. The
+    subscription's other clusters are others.
     """
     name = "cluster-public"
     pools = [agent_pool("system", "System", 5)]
@@ -605,9 +605,10 @@ def eks_node_kinds(window: SampleWindow = WINDOW, others: Sequence[Json] = ()) -
     group after step 1, so each group drops one: $73 and $29 a month, so $379 goes to $277. Step 3 moves burst from an
     m6i.xlarge to an m6i.large, which gives report's pod of 1 core and 2 GiB room enough, 1930m and 7051 MiB: $146 to
     $73, so $277 goes to $204. Each other pool is on the cheapest type that holds its pods; the spot pools compare
-    candidates at spot prices. The Fargate node is counted, and its pod left out. Only the self-managed node carries no
-    provisioner's label, so the region's instances are read for it: it is spot, in the Auto Scaling group workers-self.
-    The region's other instances are others.
+    candidates at spot prices. Step 4: the pods ask 2030m in all, and the two spot machines left, the cheapest per
+    share, hold them in their room, so burst and apps-on-demand go: $204 to $58. The Fargate node is counted, and its
+    pod left out. Only the self-managed node carries no provisioner's label, so the region's instances are read for it:
+    it is spot, in the Auto Scaling group workers-self. The region's other instances are others.
     """
     name = "cluster-eks"
     worker = {

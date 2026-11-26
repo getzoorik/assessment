@@ -62,7 +62,8 @@ STEPS = (
     "The Kubernetes saving, step by step, each step on what the one before left:\n"
     "  1. smaller pods: each container's request becomes its peak use x 1.3\n"
     "  2. spare machines: each pool's pods on as few of its machines as hold them\n"
-    "  3. cheaper machine types: the cheapest type, or mix of two, for each pool"
+    "  3. cheaper machine types: the cheapest type, or mix of two, for each pool\n"
+    "  4. packing across pools: each pod may move to any pool where it can run"
 )
 # argparse's own width on an 80-column terminal, which the description is wrapped to by hand beside the steps.
 HELP_WIDTH = 78

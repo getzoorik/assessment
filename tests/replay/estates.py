@@ -148,10 +148,11 @@ def scenario(
 def whole_estate(name: str = "whole-estate", options: Tuple[str, ...] = ()) -> Estate:
     """Make both clouds, read over the default window: two clusters and two VMs, a yes for each cloud's VMs.
 
-    Kubernetes: the public AKS cluster's $730 to $438, then $372, and the EKS cluster's $379 to $277, then $204: $1,109
-    to $576, a saving of $394 from smaller pods and spare machines and $139 from cheaper machine types. Disks: the Azure
-    VM's $200 to $24 and the instance's $50 to $9, so $250 to $33, a saving of $217. Page 1: $1,359 to $609, a saving
-    of $750, 55% of the cost today. Both parts read the region's VM sizes and instance types once.
+    Kubernetes: the public AKS cluster's $730 to $438, then $372, and the EKS cluster's $379 to $277, then $204, then
+    $58: $1,109 to $430, a saving of $540 from smaller pods and spare machines (packing included) and $139 from cheaper
+    machine types. Disks: the Azure VM's $200 to $24 and the instance's $50 to $9, so $250 to $33, a saving of $217.
+    Page 1: $1,359 to $463, a saving of $896, 66% of the cost today. Both parts read the region's VM sizes and instance
+    types once.
     """
     clusters_azure = aks_public(FIVE_MINUTES)
     clusters_aws = eks_node_kinds(FIVE_MINUTES, [DISK_INSTANCE])

@@ -46,19 +46,25 @@
       "after": 730,
       "before": 730,
       "name": "Smaller pods",
-      "row": "smaller pods and spare machines"
+      "row": "smaller pods and spare machines (packing included)"
      },
      {
       "after": 438,
       "before": 730,
       "name": "Spare machines",
-      "row": "smaller pods and spare machines"
+      "row": "smaller pods and spare machines (packing included)"
      },
      {
       "after": 372,
       "before": 438,
       "name": "Cheaper machine types",
       "row": "cheaper machine types"
+     },
+     {
+      "after": 372,
+      "before": 372,
+      "name": "Packing across pools",
+      "row": "smaller pods and spare machines (packing included)"
      }
     ],
     "usage": null,

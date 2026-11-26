@@ -33,6 +33,7 @@ from zoorik.kubernetes.model import (
 from zoorik.kubernetes.shares import workload_results
 from zoorik.kubernetes.steps import SHARED_ROW, Pipeline, line_cost
 from zoorik.kubernetes.steps.cheaper_types import CheaperTypes, Offer, Plan, Search, plans, searchable
+from zoorik.kubernetes.steps.pack_across_pools import PackAcrossPools
 from zoorik.kubernetes.steps.smaller_pods import SmallerPods
 from zoorik.kubernetes.steps.spare_machines import SpareMachines
 from zoorik.pricing.machines import Capacity, MachinePrices
@@ -282,7 +283,8 @@ def priced(cluster: ClusterId, state: ClusterState, prices: Mapping[PriceKey, Pr
 def line_results(today: ClusterState, after: ClusterState) -> Tuple[LineResult, ...]:
     """Give each line's machines and cost a month, today and after the steps; an unpriced line costs nothing in both.
 
-    The lines are after's: today's, and those of the machine types and pools the steps add, with no machines today.
+    The lines are after's: today's, and those of the machine types and pools the steps add, with no machines today. A
+    line a step adds that a later step empties has no machines today or after, so it is left out.
     """
     before, left = today.counts(), after.counts()
     results: List[LineResult] = []
@@ -290,6 +292,8 @@ def line_results(today: ClusterState, after: ClusterState) -> Tuple[LineResult, 
         for line in pool.lines:
             key = (pool.id, line.machine_type, line.capacity)
             machines_today, machines_after = before.get(key, 0), left.get(key, 0)
+            if machines_today == machines_after == 0:
+                continue
             hourly = line.hourly
             results.append(
                 LineResult(
@@ -313,7 +317,9 @@ def assess(reading: Reading, prices: Mapping[PriceKey, Price], planned: Planned)
     snapshot = reading.source.snapshot
     today = priced(reading.cluster, reading.collected.state, prices)
     cheaper = CheaperTypes({} if isinstance(planned, str) else searches(reading.cluster, planned, prices))
-    pipeline = Pipeline([SmallerPods(snapshot.usage.peaks, snapshot.limit_ranges), SpareMachines(), cheaper])
+    pipeline = Pipeline(
+        [SmallerPods(snapshot.usage.peaks, snapshot.limit_ranges), SpareMachines(), cheaper, PackAcrossPools()]
+    )
     after, steps = pipeline.run(today)
     shared = sum(step.saving for step in steps if step.row == SHARED_ROW)
     return ClusterResult(
