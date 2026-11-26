@@ -217,6 +217,21 @@ class Ec2Test(CloudTestCase):
             ),
         )
 
+    def test_instances_are_read_once_per_region(self) -> None:
+        """Both parts ask for a region's instances, and the region is read once."""
+        argv = aws(
+            "ec2",
+            "describe-instances",
+            "--filters",
+            "Name=instance-state-name,Values=pending,running,stopping,stopped",
+            "--region",
+            "eu-west-1",
+        )
+        host, runner = self.host([answer(argv, {"Reservations": [{"Instances": [instance("i-one")]}]})])
+        cli = AwsCli(host, StartedCommands())
+        self.assertEqual(cli.instances("eu-west-1"), cli.instances("eu-west-1"))
+        self.assertEqual(len(runner.runs), 1)
+
     def test_volumes_are_read(self) -> None:
         """IOPS and throughput are None where the volume type has none."""
         volumes = {

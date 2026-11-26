@@ -4,12 +4,9 @@ import unittest
 from typing import Sequence, Tuple
 
 from tests.replay.disks import (
-    ACCOUNT,
     AWS_KERNEL,
     AZURE_KERNEL,
     GIB,
-    aws_call,
-    aws_failure,
     guest_output,
     invocation,
     run_command,
@@ -17,6 +14,7 @@ from tests.replay.disks import (
     ssm_send,
     vm_id,
 )
+from tests.replay.scenarios import ACCOUNT, aws_call, aws_failure
 from tests.unit.clis import CloudTestCase
 from zoorik.cloud.aws import AwsCli
 from zoorik.cloud.azure import AzureCli

@@ -1,0 +1,79 @@
+{
+ "console": [
+  "Cluster cluster-public (westeurope): 5 nodes, 12 pods"
+ ],
+ "result": {
+  "after": 438,
+  "clusters": [
+   {
+    "bare_pods": 0,
+    "cluster": {
+     "account": "sub-one",
+     "cloud": "azure",
+     "name": "cluster-public",
+     "region": "westeurope"
+    },
+    "lines": [
+     {
+      "after": 3,
+      "capacity": "regular",
+      "cost_after": 438,
+      "cost_today": 730,
+      "hourly": 0.2,
+      "kind": "node pool",
+      "machine_type": "Standard_D4s_v5",
+      "note": "",
+      "pool": "system",
+      "today": 5
+     }
+    ],
+    "not_machines": 0,
+    "steps": [
+     {
+      "after": 730,
+      "before": 730,
+      "name": "Smaller pods",
+      "row": "smaller pods and spare machines"
+     },
+     {
+      "after": 438,
+      "before": 730,
+      "name": "Spare machines",
+      "row": "smaller pods and spare machines"
+     }
+    ],
+    "usage": null,
+    "workloads": [
+     {
+      "cpu": 2000,
+      "held": false,
+      "kind": "Deployment",
+      "memory": 4294967296,
+      "name": "a",
+      "namespace": "shop",
+      "raised": false,
+      "share": 134
+     },
+     {
+      "cpu": 1000,
+      "held": false,
+      "kind": "Deployment",
+      "memory": 12884901888,
+      "name": "b",
+      "namespace": "shop",
+      "raised": false,
+      "share": 158
+     }
+    ]
+   }
+  ],
+  "not_assessed": [],
+  "saving": 292,
+  "subscriptions": {
+   "sub-one": "subscription-one"
+  },
+  "today": 730,
+  "unread": []
+ },
+ "started": "Nothing in your cloud was changed."
+}

@@ -1,0 +1,133 @@
+{
+ "console": [
+  "Cluster cluster-eks (eu-west-1): 7 nodes, 7 pods"
+ ],
+ "result": {
+  "after": 277,
+  "clusters": [
+   {
+    "bare_pods": 0,
+    "cluster": {
+     "account": "123456789012",
+     "cloud": "aws",
+     "name": "cluster-eks",
+     "region": "eu-west-1"
+    },
+    "lines": [
+     {
+      "after": 1,
+      "capacity": "spot",
+      "cost_after": 29,
+      "cost_today": 29,
+      "hourly": 0.04,
+      "kind": "Auto Scaling group",
+      "machine_type": "m6i.large",
+      "note": "",
+      "pool": "workers-self",
+      "today": 1
+     },
+     {
+      "after": 1,
+      "capacity": "regular",
+      "cost_after": 146,
+      "cost_today": 146,
+      "hourly": 0.2,
+      "kind": "NodePool",
+      "machine_type": "m6i.xlarge",
+      "note": "",
+      "pool": "burst",
+      "today": 1
+     },
+     {
+      "after": 1,
+      "capacity": "regular",
+      "cost_after": 73,
+      "cost_today": 146,
+      "hourly": 0.1,
+      "kind": "node group",
+      "machine_type": "m6i.large",
+      "note": "",
+      "pool": "apps-on-demand",
+      "today": 2
+     },
+     {
+      "after": 1,
+      "capacity": "spot",
+      "cost_after": 29,
+      "cost_today": 58,
+      "hourly": 0.04,
+      "kind": "node group",
+      "machine_type": "m6i.large",
+      "note": "",
+      "pool": "apps-spot",
+      "today": 2
+     }
+    ],
+    "not_machines": 1,
+    "steps": [
+     {
+      "after": 379,
+      "before": 379,
+      "name": "Smaller pods",
+      "row": "smaller pods and spare machines"
+     },
+     {
+      "after": 277,
+      "before": 379,
+      "name": "Spare machines",
+      "row": "smaller pods and spare machines"
+     }
+    ],
+    "usage": null,
+    "workloads": [
+     {
+      "cpu": 0,
+      "held": false,
+      "kind": "CronJob",
+      "memory": 0,
+      "name": "report",
+      "namespace": "batch",
+      "raised": false,
+      "share": 0
+     },
+     {
+      "cpu": 0,
+      "held": false,
+      "kind": "Deployment",
+      "memory": 0,
+      "name": "tools",
+      "namespace": "shop",
+      "raised": false,
+      "share": 0
+     },
+     {
+      "cpu": 740,
+      "held": false,
+      "kind": "Deployment",
+      "memory": 1602224128,
+      "name": "web",
+      "namespace": "shop",
+      "raised": false,
+      "share": 62
+     },
+     {
+      "cpu": 480,
+      "held": false,
+      "kind": "Deployment",
+      "memory": 1056964608,
+      "name": "worker",
+      "namespace": "shop",
+      "raised": false,
+      "share": 40
+     }
+    ]
+   }
+  ],
+  "not_assessed": [],
+  "saving": 102,
+  "subscriptions": {},
+  "today": 379,
+  "unread": []
+ },
+ "started": "Nothing in your cloud was changed."
+}

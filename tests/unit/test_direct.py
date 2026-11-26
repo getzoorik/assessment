@@ -26,7 +26,7 @@ from tests.replay.recording import Call, Failure, call_key
 from tests.replay.scenarios import call
 from tests.unit.clis import CloudTestCase, WatchingRunner
 from zoorik.cloud.cli import Host
-from zoorik.errors import ClusterUnreadable, ToolNotInstalled, UnexpectedResponse
+from zoorik.errors import ApiUnreachable, ClusterUnreadable, ToolNotInstalled, UnexpectedResponse
 from zoorik.kubectl.api import Snapshot, snapshot
 from zoorik.kubectl.direct import (
     DOCS,
@@ -144,10 +144,21 @@ class DirectReadTest(CloudTestCase):
         self.assertEqual(len(self.runner.runs), 1)
 
     def test_an_api_server_that_cannot_be_reached_is_named(self) -> None:
-        """When /version can't be reached, the read stops there and says so."""
+        """When /version can't be reached, the read stops there and says so, as an API server out of reach."""
         error = "Unable to connect to the server: dial tcp 10.0.0.1:443: i/o timeout\n"
-        self.assertEqual(self.unreadable([call(VERSION, exit_code=1, stderr=error)]), UNREACHABLE)
+        with self.assertRaises(ApiUnreachable) as raised:
+            self.read([call(VERSION, exit_code=1, stderr=error)])
+        self.assertEqual(str(raised.exception), UNREACHABLE)
         self.assertEqual(len(self.runner.runs), 1)
+
+    def test_a_list_that_times_out_after_the_version_check_is_not_out_of_reach(self) -> None:
+        """The API server answered /version, so a list that times out leaves the cluster unreadable."""
+        nodes = call(kubectl("get", "--raw", "/api/v1/nodes?limit=500"), exit_code=1, stderr="i/o timeout\n")
+        with self.assertRaises(ClusterUnreadable) as raised:
+            self.read([version_call(), nodes])
+        self.assertEqual(
+            (type(raised.exception), str(raised.exception)), (ClusterUnreadable, f"cannot list nodes: {UNREACHABLE}")
+        )
 
     def test_forbidden_is_named(self) -> None:
         """A list the identity may not read names the access it needs."""
@@ -222,7 +233,6 @@ class FailureTest(CloudTestCase):
                 "An error occurred (ExpiredToken) when calling the GetCallerIdentity operation",
                 "AWS credentials have expired",
             ),
-            ("dial tcp: lookup one.example.test on 10.0.0.2:53: no such host", UNREACHABLE),
             ("failed to connect to MSI endpoint", "Cloud Shell sign-in issue; run az login, then run this again"),
             (
                 'error: the server doesn\'t have a resource type "csinodes"',
@@ -234,8 +244,15 @@ class FailureTest(CloudTestCase):
                 error = failure(text)
                 self.assertEqual((type(error), str(error)), (ClusterUnreadable, reason))
 
+    def test_an_api_server_out_of_reach_is_its_own_kind(self) -> None:
+        """A network error makes the cluster unreadable as an API server out of reach, which a reader can tell apart."""
+        error = failure("dial tcp: lookup one.example.test on 10.0.0.2:53: no such host")
+        self.assertEqual((type(error), str(error)), (ApiUnreachable, UNREACHABLE))
+        self.assertIsInstance(error, ClusterUnreadable)
+
     def test_only_a_missing_kubelogin_is_a_missing_tool(self) -> None:
         """Every reason makes the cluster unreadable, except a missing kubelogin, which is a tool to install."""
         kinds = {row.text: row.kind for row in KUBECTL_REASONS}
         self.assertEqual(kinds.pop(KUBELOGIN_MISSING), ToolNotInstalled)
+        self.assertEqual(kinds.pop(UNREACHABLE), ApiUnreachable)
         self.assertEqual(set(kinds.values()), {ClusterUnreadable})

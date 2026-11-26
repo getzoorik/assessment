@@ -3,24 +3,13 @@
 from typing import List, Sequence, Tuple
 
 from tests.replay.disks import (
-    AWS_SCOPE,
-    AZURE_SCOPE,
     D8S,
-    EU,
     SKUS_ARGS,
     SSM_ONLINE_ARGS,
-    SUB,
-    Json,
     attached,
-    aws_failure,
-    az_call,
-    az_failure,
     azure_inventory,
-    cluster_list,
     disk_row,
     graph_args,
-    instance,
-    instances_args,
     region_reads,
     root_volume,
     skus,
@@ -30,6 +19,19 @@ from tests.replay.disks import (
     volume,
 )
 from tests.replay.recording import Call
+from tests.replay.scenarios import (
+    AWS_SCOPE,
+    AZURE_SCOPE,
+    EU,
+    SUB,
+    Json,
+    aws_failure,
+    az_call,
+    az_failure,
+    cluster_list,
+    instance,
+    instances_args,
+)
 from tests.unit.clis import CloudTestCase, WatchingRunner
 from zoorik.cloud import azure as azure_cloud
 from zoorik.cloud.aws import AwsCli

@@ -1,0 +1,242 @@
+"""The Kubernetes part of the run: every AKS and EKS cluster read and priced, and what the steps save on each.
+
+Each cluster is read the way its settings choose, a few at a time. Its machines are priced at list prices, at spot for
+machines on spot today, and the steps run on it in order. A cluster that can't be read, and a line that can't be priced,
+are named with the reason.
+"""
+
+from dataclasses import dataclass, replace
+from typing import Dict, List, Mapping, Optional, Sequence, Set, Tuple, Union
+
+from zoorik.cloud.aws import AwsCli, AwsScope
+from zoorik.cloud.azure import AzureCli, AzureScope
+from zoorik.cloud.keys import AWS, AZURE, PLATFORMS
+from zoorik.console import ConsolePart
+from zoorik.errors import AssessmentError, PriceNotFound
+from zoorik.format import count
+from zoorik.kubectl.usage import SampleWindow
+from zoorik.kubernetes.collect import NO_CONTROLLER, Collected, collect
+from zoorik.kubernetes.discovery import AksSource, ClusterSource, EksSource, Found, Readers, Target
+from zoorik.kubernetes.model import (
+    ClusterId,
+    ClusterRead,
+    ClusterResult,
+    ClusterState,
+    KubernetesResult,
+    Line,
+    LineResult,
+    NotAssessed,
+)
+from zoorik.kubernetes.shares import workload_results
+from zoorik.kubernetes.steps import SHARED_ROW, Pipeline, line_cost
+from zoorik.kubernetes.steps.smaller_pods import SmallerPods
+from zoorik.kubernetes.steps.spare_machines import SpareMachines
+from zoorik.pricing.machines import Capacity, MachinePrices
+from zoorik.system.workers import parallel
+
+# How each cloud's lines name the scope its clusters are listed in.
+SCOPE_WORDS = {AZURE: "Subscription", AWS: "Region"}
+
+# What a line is priced by: its cloud, region, machine type and capacity.
+PriceKey = Tuple[str, str, str, Capacity]
+# A line's hourly price, or why it has none.
+Price = Union[float, str]
+
+
+@dataclass(frozen=True)
+class ClusterCloud:
+    """One cloud as the Kubernetes part reads it: its clusters, and its machines' list prices."""
+
+    key: str
+    source: ClusterSource
+    prices: MachinePrices
+
+
+def azure_clusters(
+    cli: AzureCli, scope: AzureScope, prices: MachinePrices, readers: Readers, no_invoke: bool
+) -> ClusterCloud:
+    """Read the AKS clusters of scope's subscriptions through cli and readers, priced with prices."""
+    return ClusterCloud(AZURE, AksSource(cli, scope, readers, no_invoke), prices)
+
+
+def aws_clusters(cli: AwsCli, scope: AwsScope, prices: MachinePrices, readers: Readers) -> ClusterCloud:
+    """Read the EKS clusters of scope's regions through cli and readers, priced with prices."""
+    return ClusterCloud(AWS, EksSource(cli, scope, readers), prices)
+
+
+@dataclass(frozen=True)
+class Reading:
+    """A cluster the run read: its name, what was read, and the cluster as the steps see it."""
+
+    cluster: ClusterId
+    source: ClusterRead
+    collected: Collected
+
+
+class KubernetesAssessment:
+    """The Kubernetes part: reads each cloud's clusters, prices their machines, and runs the steps on each."""
+
+    def __init__(self, clouds: Sequence[ClusterCloud], window: SampleWindow, console: ConsolePart) -> None:
+        """Assess the clusters of clouds, in their order, sampling usage over window and writing to console."""
+        self._clouds = {cloud.key: cloud for cloud in clouds}
+        self._window = window
+        self._console = console
+
+    def run(self) -> KubernetesResult:
+        """Assess every cluster."""
+        found = [self._discover(cloud) for cloud in self._clouds.values()]
+        targets = [target for each in found for target in each.targets]
+        results = parallel(self._read, targets, self._console.progress("clusters"))
+        assessed: List[Reading] = []
+        failed: List[NotAssessed] = []
+        for target, result in zip(targets, results):
+            cluster = target.cluster
+            if isinstance(result, AssessmentError):
+                failed.append(NotAssessed(cluster.cloud, cluster.account, cluster.region, cluster.name, str(result)))
+                self._console.line(f"Cluster {cluster.name} ({cluster.region}): not assessed, {result}")
+            else:
+                assessed.append(Reading(cluster, result, collect(cluster.cloud, result)))
+                self._console.line(read_line(cluster, result))
+        prices = self._prices(assessed)
+        return KubernetesResult(
+            clusters=tuple(assess(each, prices) for each in assessed),
+            not_assessed=(*(named for each in found for named in each.not_assessed), *failed),
+            unread=tuple(scope for each in found for scope in each.unread),
+            subscriptions={key: name for each in found for key, name in each.names.items()},
+        )
+
+    def _discover(self, cloud: ClusterCloud) -> Found:
+        """List one cloud's clusters, and say which scopes and clusters are left out, and why."""
+        word = SCOPE_WORDS[cloud.key]
+        found = cloud.source.clusters(self._console.progress(f"{word.lower()}s"))
+        for scope in found.unread:
+            self._console.line(f"{word} {scope.name}: clusters not listed, {scope.reason}")
+        if found.empty:
+            self._console.line(f"{count(found.empty, word.lower())} with no {PLATFORMS[cloud.key]} clusters.")
+        for named in found.not_assessed:
+            self._console.line(f"Cluster {named.name} ({named.region}): not assessed, {named.reason}")
+        return found
+
+    def _read(self, target: Target) -> ClusterRead:
+        """Read one cluster, its usage sampled over the window."""
+        return target.read(self._window)
+
+    def _prices(self, assessed: Sequence[Reading]) -> Dict[PriceKey, Price]:
+        """Price each machine type once per region and capacity, a few at a time.
+
+        Each region's price list is read first, in as few calls as it allows. A price list that can't be read is named
+        once for each cloud.
+        """
+        found: Set[PriceKey] = set()
+        for each in assessed:
+            found |= price_keys(each)
+        keys = sorted(found, key=lambda key: (key[0], key[1], key[2], key[3].value))
+        regions: Dict[Tuple[str, str], Set[str]] = {}
+        for cloud, region, machine_type, _ in keys:
+            regions.setdefault((cloud, region), set()).add(machine_type)
+        parallel(self._read_prices, sorted(regions.items()), self._console.progress("price lists"))
+        results = parallel(self._hourly, keys, self._console.progress("machine prices"))
+        prices: Dict[PriceKey, Price] = {}
+        unreadable: Dict[str, List[str]] = {}
+        for key, result in zip(keys, results):
+            if isinstance(result, PriceNotFound):
+                prices[key] = str(result)
+            elif isinstance(result, AssessmentError):
+                prices[key] = f"price list not readable for {key[1]}"
+                unreadable.setdefault(key[0], []).append(str(result))
+            else:
+                prices[key] = result
+        for cloud in self._clouds:
+            if cloud in unreadable:
+                self._console.line(f"Machine list prices: {min(unreadable[cloud])}")
+        return prices
+
+    def _read_prices(self, item: Tuple[Tuple[str, str], Set[str]]) -> None:
+        """Read one region's prices for its machine types; a failure is kept for hourly to raise."""
+        (cloud, region), machine_types = item
+        self._clouds[cloud].prices.read(region, machine_types)
+
+    def _hourly(self, key: PriceKey) -> float:
+        """Give one machine type's hourly list price in a region, bought one way."""
+        cloud, region, machine_type, capacity = key
+        return self._clouds[cloud].prices.hourly(region, machine_type, capacity)
+
+
+def read_line(cluster: ClusterId, read: ClusterRead) -> str:
+    """Say what was read of a cluster, and why its usage wasn't read, when it wasn't."""
+    snapshot = read.snapshot
+    nodes, pods = count(len(snapshot.nodes), "node"), count(len(snapshot.pods), "pod")
+    reason = snapshot.usage.reason
+    usage = "" if reason is None else f" (usage not read: {reason})"
+    return f"Cluster {cluster.name} ({cluster.region}): {nodes}, {pods}{usage}"
+
+
+def price_key(cluster: ClusterId, line: Line) -> Optional[PriceKey]:
+    """Give what a line is priced by; None for a line that can't have a price."""
+    if line.note or line.machine_type is None or line.capacity is None:
+        return None
+    return (cluster.cloud, cluster.region, line.machine_type, line.capacity)
+
+
+def price_keys(reading: Reading) -> Set[PriceKey]:
+    """Give what each of a cluster's lines that can have a price is priced by."""
+    keys = (price_key(reading.cluster, line) for pool in reading.collected.state.pools for line in pool.lines)
+    return {key for key in keys if key is not None}
+
+
+def priced(cluster: ClusterId, state: ClusterState, prices: Mapping[PriceKey, Price]) -> ClusterState:
+    """Give the state with each line's hourly price, or why it has none."""
+
+    def line_priced(line: Line) -> Line:
+        key = price_key(cluster, line)
+        if key is None:
+            return line
+        price = prices[key]
+        return replace(line, note=price) if isinstance(price, str) else replace(line, hourly=price)
+
+    pools = tuple(replace(pool, lines=tuple(line_priced(line) for line in pool.lines)) for pool in state.pools)
+    return replace(state, pools=pools)
+
+
+def line_results(today: ClusterState, after: ClusterState) -> Tuple[LineResult, ...]:
+    """Give each line's machines and cost a month, today and after the steps; an unpriced line costs nothing in both."""
+    before, left = today.counts(), after.counts()
+    results: List[LineResult] = []
+    for pool in today.pools:
+        for line in pool.lines:
+            key = (pool.id, line.machine_type, line.capacity)
+            machines_today, machines_after = before.get(key, 0), left.get(key, 0)
+            hourly = line.hourly
+            results.append(
+                LineResult(
+                    pool=pool.name,
+                    kind=pool.kind,
+                    machine_type=line.machine_type,
+                    capacity=None if line.capacity is None else line.capacity.value,
+                    hourly=hourly,
+                    note=line.note,
+                    today=machines_today,
+                    after=machines_after,
+                    cost_today=0 if hourly is None else line_cost(machines_today, hourly),
+                    cost_after=0 if hourly is None else line_cost(machines_after, hourly),
+                )
+            )
+    return tuple(results)
+
+
+def assess(reading: Reading, prices: Mapping[PriceKey, Price]) -> ClusterResult:
+    """Price one cluster's machines and run the steps on it."""
+    snapshot = reading.source.snapshot
+    today = priced(reading.cluster, reading.collected.state, prices)
+    pipeline = Pipeline([SmallerPods(snapshot.usage.peaks, snapshot.limit_ranges), SpareMachines()])
+    after, steps = pipeline.run(today)
+    shared = sum(step.saving for step in steps if step.row == SHARED_ROW)
+    return ClusterResult(
+        cluster=reading.cluster,
+        lines=line_results(today, after),
+        steps=steps,
+        workloads=workload_results(today, after, shared),
+        bare_pods=sum(1 for pod in today.pods if pod.stays == NO_CONTROLLER),
+        not_machines=reading.collected.not_machines,
+        usage=snapshot.usage.reason,
+    )

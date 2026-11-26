@@ -1,0 +1,23 @@
+{
+ "console": [
+  "Subscription subscription-one: clusters not listed, access denied"
+ ],
+ "result": {
+  "after": 0,
+  "clusters": [],
+  "not_assessed": [],
+  "saving": 0,
+  "subscriptions": {
+   "sub-one": "subscription-one"
+  },
+  "today": 0,
+  "unread": [
+   {
+    "cloud": "azure",
+    "name": "subscription-one",
+    "reason": "access denied"
+   }
+  ]
+ },
+ "started": "Nothing in your cloud was changed."
+}

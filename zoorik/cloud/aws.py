@@ -233,6 +233,7 @@ class AwsCli:
         self._temp_root = host.temp_root
         self._started = started
         self._cluster_names: Memo[str, Tuple[str, ...]] = Memo(self._read_cluster_names)
+        self._instances: Memo[str, Tuple[Ec2Instance, ...]] = Memo(self._read_instances)
         self._instance_types: Memo[str, Dict[str, InstanceType]] = Memo(self._read_instance_types)
         self._type_zones: Memo[str, Dict[str, Tuple[str, ...]]] = Memo(self._read_type_zones)
 
@@ -275,14 +276,9 @@ class AwsCli:
         self._cli.run(["aws", "eks", "update-kubeconfig", "--name", cluster, "--kubeconfig", path, "--region", region])
         return path
 
-    def instances(self, region: str) -> List[Ec2Instance]:
-        """Read the instances of a region that hold their volumes: pending, running, stopping or stopped."""
-        answer = self._cli.read(["aws", "ec2", "describe-instances", "--filters", LIVE_STATES, "--region", region])
-        return [
-            _instance(instance)
-            for reservation in Record(answer, "aws ec2 describe-instances").records("Reservations")
-            for instance in reservation.records("Instances")
-        ]
+    def instances(self, region: str) -> Tuple[Ec2Instance, ...]:
+        """Read the instances of a region that hold their volumes; read once per run, for both parts."""
+        return self._instances.get(region)
 
     def volumes(self, region: str) -> List[EbsVolume]:
         """Read the EBS volumes of a region."""
@@ -425,6 +421,15 @@ class AwsCli:
         """Read the names of a region's EKS clusters."""
         answer = self._cli.read(["aws", "eks", "list-clusters", "--region", region])
         return tuple(sorted(Record(answer, "aws eks list-clusters").texts("clusters")))
+
+    def _read_instances(self, region: str) -> Tuple[Ec2Instance, ...]:
+        """Read the instances of a region that hold their volumes: pending, running, stopping or stopped."""
+        answer = self._cli.read(["aws", "ec2", "describe-instances", "--filters", LIVE_STATES, "--region", region])
+        return tuple(
+            _instance(instance)
+            for reservation in Record(answer, "aws ec2 describe-instances").records("Reservations")
+            for instance in reservation.records("Instances")
+        )
 
     def _read_instance_types(self, region: str) -> Dict[str, InstanceType]:
         """Read every instance type of a region."""

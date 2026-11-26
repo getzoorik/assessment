@@ -7,7 +7,7 @@ from urllib.parse import urlencode
 
 from zoorik.cloud.cli import Host, Reason, reason_row, summary
 from zoorik.cloud.fields import parse_json
-from zoorik.errors import AssessmentError, ClusterUnreadable, ToolNotInstalled
+from zoorik.errors import ApiUnreachable, AssessmentError, ClusterUnreadable, ToolNotInstalled
 from zoorik.kubectl.api import PAGE_SIZE, REQUEST_TIMEOUT, Snapshot, snapshot
 from zoorik.kubectl.objects import KINDS, Json, Kind, slim_page
 from zoorik.kubectl.usage import SAMPLE_INTERVAL, ContainerKey, Peak, SampleWindow, Usage, top_table, usage_of
@@ -41,7 +41,7 @@ KUBECTL_REASONS = (
     Reason(
         r"i/o timeout|dial tcp|no such host|connection refused|was refused|no route to host|network is unreachable"
         r"|unable to connect|deadline exceeded|timeout exceeded|tls handshake timeout|timed out",
-        ClusterUnreadable,
+        ApiUnreachable,
         UNREACHABLE,
     ),
 )
@@ -63,7 +63,9 @@ def failure(text: str) -> AssessmentError:
 def listing_failure(kind: Kind, text: str) -> AssessmentError:
     """Give the typed failure for a kind that could not be listed, naming the kind."""
     error = failure(text)
-    return type(error)(f"cannot list {kind.resource}: {error}")
+    named = f"cannot list {kind.resource}: {error}"
+    # The API server answered the /version check, so a network error now makes the cluster unreadable, not out of reach.
+    return ClusterUnreadable(named) if isinstance(error, ApiUnreachable) else type(error)(named)
 
 
 @dataclass(frozen=True)

@@ -8,20 +8,34 @@ from these answers.
 import json
 import urllib.parse
 from dataclasses import dataclass
-from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import List, Mapping, Optional, Sequence, Tuple
 
 from tests.replay.recording import Body, Call, Fetch
-from tests.replay.scenarios import call
-from zoorik.cloud import aws as aws_cloud
+from tests.replay.scenarios import (
+    ACCOUNT,
+    AWS_SCOPE,
+    AZURE_SCOPE,
+    EU,
+    GROUP,
+    REGION,
+    SUB,
+    US,
+    Json,
+    aws_call,
+    aws_failure,
+    az_call,
+    az_failure,
+    cluster_list,
+    instance,
+    instances_args,
+)
 from zoorik.cloud import azure as azure_cloud
 from zoorik.cloud.aws import AwsScope
-from zoorik.cloud.azure import AzureScope, Subscription
+from zoorik.cloud.azure import AzureScope
 from zoorik.cloud.keys import AWS, AZURE
 from zoorik.disks.guest import GUEST_SCRIPT
 from zoorik.disks.metrics import AZURE_METRICS, EBS_METRICS
 from zoorik.pricing.retail import RETAIL_PRICES_URL
-
-Json = Dict[str, object]
 
 GIB = 2**30
 # The metric window of a run started at FACTS.started: the 14 days to the start of its hour.
@@ -33,16 +47,6 @@ HOUR_TWO = "2026-01-04T11:00:00Z"
 CLOUDWATCH_HOUR = "2026-01-04T10:00:00+00:00"
 AZURE_KERNEL = "5.15.0-1057-azure"
 AWS_KERNEL = "6.1.115-126.197.amzn2023.x86_64"
-
-SUB = "sub-one"
-TENANT = "tenant-one"
-REGION = "westeurope"
-GROUP = "group-one"
-AZURE_SCOPE = AzureScope("Directory One (one.example.test)", (Subscription(SUB, "subscription-one", TENANT),), ())
-ACCOUNT = "123456789012"
-EU = "eu-west-1"
-US = "us-east-1"
-AWS_SCOPE = AwsScope(ACCOUNT, (EU,))
 
 # Each Premium SSD and Standard SSD tier the scenarios use: its IOPS and MB/s, as Azure sets them on the disk record.
 TIER_PERFORMANCE = {
@@ -67,16 +71,6 @@ class DiskScenario:
 
 
 # ---------------------------------------------------------------- Azure answers
-
-
-def az_call(args: Sequence[str], value: object) -> Call:
-    """Make an az call as the reader runs it, answered with value as JSON."""
-    return call(["az", *args, *azure_cloud.AZURE.output], json.dumps(value))
-
-
-def az_failure(args: Sequence[str], stderr: str) -> Call:
-    """Make an az call as the reader runs it, failing with stderr."""
-    return call(["az", *args, *azure_cloud.AZURE.output], exit_code=1, stderr=stderr)
 
 
 def graph_args(query: str) -> List[str]:
@@ -309,36 +303,6 @@ def azure_scenario(name: str, calls: Sequence[Call], answers: Sequence[Optional[
 # ---------------------------------------------------------------- AWS answers
 
 
-def aws_call(args: Sequence[str], value: object) -> Call:
-    """Make an aws call as the reader runs it, answered with value as JSON."""
-    return call(["aws", *args, *aws_cloud.AWS.output], json.dumps(value))
-
-
-def aws_failure(args: Sequence[str], stderr: str) -> Call:
-    """Make an aws call as the reader runs it, failing with stderr."""
-    return call(["aws", *args, *aws_cloud.AWS.output], exit_code=255, stderr=stderr)
-
-
-def instance(
-    number: int, kind: str, volumes: Sequence[Tuple[str, str]], tags: Optional[Mapping[str, str]] = None
-) -> Json:
-    """Make a running Linux instance i-0<number>: its root volume, its data volumes by device and its tags."""
-    mappings = [("/dev/xvda", f"vol-root-0{number}"), *volumes]
-    record: Json = {
-        "InstanceId": f"i-0{number}",
-        "InstanceType": kind,
-        "State": {"Code": 16, "Name": "running"},
-        "RootDeviceName": "/dev/xvda",
-        "BlockDeviceMappings": [
-            {"DeviceName": device, "Ebs": {"VolumeId": volume, "Status": "attached"}} for device, volume in mappings
-        ],
-        "NetworkInterfaces": [{"NetworkInterfaceId": f"eni-0{number}"}],
-    }
-    if tags is not None:
-        record["Tags"] = [{"Key": key, "Value": value} for key, value in tags.items()]
-    return record
-
-
 def volume(volume_id: str, kind: str, size: int, iops: Optional[int] = None, throughput: Optional[int] = None) -> Json:
     """Make an EBS volume as describe-volumes gives it."""
     record: Json = {
@@ -359,11 +323,6 @@ def volume(volume_id: str, kind: str, size: int, iops: Optional[int] = None, thr
 def root_volume(number: int) -> Json:
     """Make instance i-0<number>'s root volume."""
     return volume(f"vol-root-0{number}", "gp3", 8, 3000, 125)
-
-
-def instances_args(region: str) -> List[str]:
-    """Give the aws arguments that read a region's instances."""
-    return ["ec2", "describe-instances", "--filters", aws_cloud.LIVE_STATES, "--region", region]
 
 
 def region_reads(region: str, instances: Sequence[Json], volumes: Sequence[Json]) -> List[Call]:
@@ -422,11 +381,6 @@ def ssm_online(online: Sequence[str]) -> Call:
     """Make the region's answer of the instances whose Systems Manager agent is online."""
     listed = [{"InstanceId": item, "PingStatus": "Online", "ResourceType": "EC2Instance"} for item in online]
     return aws_call(SSM_ONLINE_ARGS, {"InstanceInformationList": listed})
-
-
-def cluster_list(clusters: Sequence[str], region: str = EU) -> Call:
-    """Make the region's EKS cluster list."""
-    return aws_call(["eks", "list-clusters", "--region", region], {"clusters": list(clusters)})
 
 
 def ssm_send(instance_id: str) -> Call:

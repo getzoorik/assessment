@@ -59,7 +59,7 @@ name = "Each layer imports only the layers below it"
 type = "layers"
 layers = [
   "zoorik.report",
-  "zoorik.disks",
+  "zoorik.kubernetes | zoorik.disks",
   "zoorik.kubectl | zoorik.pricing",
   "zoorik.cloud",
   "zoorik.system",

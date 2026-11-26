@@ -1,0 +1,25 @@
+{
+ "console": [
+  "Cluster cluster-stopped (westeurope): not assessed, the cluster is stopped"
+ ],
+ "result": {
+  "after": 0,
+  "clusters": [],
+  "not_assessed": [
+   {
+    "account": "sub-one",
+    "cloud": "azure",
+    "name": "cluster-stopped",
+    "reason": "the cluster is stopped",
+    "region": "westeurope"
+   }
+  ],
+  "saving": 0,
+  "subscriptions": {
+   "sub-one": "subscription-one"
+  },
+  "today": 0,
+  "unread": []
+ },
+ "started": "Nothing in your cloud was changed."
+}

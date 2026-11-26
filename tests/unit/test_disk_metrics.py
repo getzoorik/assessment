@@ -8,7 +8,6 @@ from tests.replay.disks import (
     END,
     HOUR_ONE,
     HOUR_TWO,
-    REGION,
     START,
     cloudwatch,
     disk_id,
@@ -16,7 +15,7 @@ from tests.replay.disks import (
     monitor,
 )
 from tests.replay.fake_cloud import VirtualClock
-from tests.replay.scenarios import FACTS
+from tests.replay.scenarios import FACTS, REGION
 from tests.unit.clis import CloudTestCase
 from zoorik.cloud.aws import AwsCli
 from zoorik.cloud.azure import AzureCli

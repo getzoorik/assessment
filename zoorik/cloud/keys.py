@@ -3,3 +3,5 @@
 AZURE = "azure"
 AWS = "aws"
 CLOUD_NAMES = {AZURE: "Azure", AWS: "AWS"}
+# Each cloud's Kubernetes service, whose clusters the run assesses.
+PLATFORMS = {AZURE: "AKS", AWS: "EKS"}

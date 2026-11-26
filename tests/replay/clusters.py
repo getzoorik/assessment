@@ -440,12 +440,12 @@ FORBIDDEN = (
 # ---------------------------------------------------------------- the direct read's answers
 
 
-def kubectl(*args: str, request_timeout: str = "60s") -> List[str]:
-    """Give a kubectl command as the direct read runs it."""
+def kubectl(*args: str, request_timeout: str = "60s", kubeconfig: str = KUBECONFIG) -> List[str]:
+    """Give a kubectl command as the direct read runs it with kubeconfig."""
     return [
         "kubectl",
         "--kubeconfig",
-        KUBECONFIG,
+        kubeconfig,
         "--cache-dir",
         "<temp>/cache",
         "--request-timeout",
@@ -454,13 +454,15 @@ def kubectl(*args: str, request_timeout: str = "60s") -> List[str]:
     ]
 
 
-def version_call() -> Call:
+def version_call(kubeconfig: str = KUBECONFIG) -> Call:
     """Make the answer to the /version check."""
     version = {"major": "1", "minor": "30", "gitVersion": "v1.30.4", "goVersion": "go1.22.5", "platform": "linux/amd64"}
-    return call(kubectl("get", "--raw", "/version", request_timeout="20s"), json.dumps(version))
+    return call(kubectl("get", "--raw", "/version", request_timeout="20s", kubeconfig=kubeconfig), json.dumps(version))
 
 
-def list_calls(kind: Kind, items: Sequence[Json], per_page: int = PAGE_SIZE) -> List[Call]:
+def list_calls(
+    kind: Kind, items: Sequence[Json], per_page: int = PAGE_SIZE, *, kubeconfig: str = KUBECONFIG
+) -> List[Call]:
     """Make the answers to kind's paged list: per_page items a page, each page but the last with a continue token."""
     pages = [list(items[start : start + per_page]) for start in range(0, len(items), per_page)] or [[]]
     calls: List[Call] = []
@@ -470,25 +472,33 @@ def list_calls(kind: Kind, items: Sequence[Json], per_page: int = PAGE_SIZE) -> 
         if number + 1 < len(pages):
             metadata["continue"] = f"page{number + 1}="
         document = {"kind": kind.list_kind, "apiVersion": "v1", "metadata": metadata, "items": page}
-        calls.append(call(kubectl("get", "--raw", f"{kind.path}?{query}"), json.dumps(document)))
+        calls.append(call(kubectl("get", "--raw", f"{kind.path}?{query}", kubeconfig=kubeconfig), json.dumps(document)))
     return calls
 
 
-def top_calls(samples: Sequence[Sample]) -> List[Call]:
+def top_calls(samples: Sequence[Sample], kubeconfig: str = KUBECONFIG) -> List[Call]:
     """Make the answers to the window's kubectl top samples, in order."""
+    argv = kubectl(*TOP, kubeconfig=kubeconfig)
     return [
-        call(kubectl(*TOP), sample)
-        if isinstance(sample, str)
-        else call(kubectl(*TOP), exit_code=1, stderr=sample.stderr)
+        call(argv, sample) if isinstance(sample, str) else call(argv, exit_code=1, stderr=sample.stderr)
         for sample in samples
     ]
 
 
-def direct_calls(cluster: Cluster, per_page: Optional[Mapping[str, int]] = None) -> List[Call]:
-    """Make every answer the direct read gets: the version check, each kind's pages, then the samples."""
+def direct_calls(
+    cluster: Cluster, per_page: Optional[Mapping[str, int]] = None, kubeconfig: str = KUBECONFIG
+) -> List[Call]:
+    """Make every answer the direct read gets through kubeconfig: the version check, each kind's pages, the samples."""
     sizes = per_page or {}
-    lists = [list_calls(kind, cluster.objects[kind.name], sizes.get(kind.name, PAGE_SIZE)) for kind in KINDS]
-    return [version_call(), *(page for pages in lists for page in pages), *top_calls(cluster.samples)]
+    lists = [
+        list_calls(kind, cluster.objects[kind.name], sizes.get(kind.name, PAGE_SIZE), kubeconfig=kubeconfig)
+        for kind in KINDS
+    ]
+    return [
+        version_call(kubeconfig),
+        *(page for pages in lists for page in pages),
+        *top_calls(cluster.samples, kubeconfig),
+    ]
 
 
 # ---------------------------------------------------------------- the command-invoke read's answer

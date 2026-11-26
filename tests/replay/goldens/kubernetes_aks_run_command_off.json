@@ -1,0 +1,25 @@
+{
+ "console": [
+  "Cluster cluster-private (westeurope): not assessed, command invoke is turned off for this cluster"
+ ],
+ "result": {
+  "after": 0,
+  "clusters": [],
+  "not_assessed": [
+   {
+    "account": "sub-one",
+    "cloud": "azure",
+    "name": "cluster-private",
+    "reason": "command invoke is turned off for this cluster",
+    "region": "westeurope"
+   }
+  ],
+  "saving": 0,
+  "subscriptions": {
+   "sub-one": "subscription-one"
+  },
+  "today": 0,
+  "unread": []
+ },
+ "started": "Nothing in your cloud was changed."
+}

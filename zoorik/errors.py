@@ -45,5 +45,9 @@ class ClusterUnreadable(AssessmentError):
     """A cluster could not be read in full."""
 
 
+class ApiUnreachable(ClusterUnreadable):
+    """A cluster's API server did not answer from where the run is."""
+
+
 class ReportNotWritable(AssessmentError):
     """The report's folder or file cannot be written."""

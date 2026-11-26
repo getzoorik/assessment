@@ -1,0 +1,25 @@
+{
+ "console": [
+  "Cluster cluster-entra (westeurope): not assessed, kubelogin is not installed; install it with az aks install-cli"
+ ],
+ "result": {
+  "after": 0,
+  "clusters": [],
+  "not_assessed": [
+   {
+    "account": "sub-one",
+    "cloud": "azure",
+    "name": "cluster-entra",
+    "reason": "kubelogin is not installed; install it with az aks install-cli",
+    "region": "westeurope"
+   }
+  ],
+  "saving": 0,
+  "subscriptions": {
+   "sub-one": "subscription-one"
+  },
+  "today": 0,
+  "unread": []
+ },
+ "started": "Nothing in your cloud was changed."
+}
