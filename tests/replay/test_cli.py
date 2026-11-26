@@ -359,19 +359,17 @@ class WholeEstateTest(unittest.TestCase):
     """Page 1 of the whole estate, against the figures its estate works out by hand."""
 
     def test_page_one_adds_both_parts(self) -> None:
-        """$1,109 of machines and $250 of disks are $1,359 today and $463 after: a saving of $896, 66%, in three rows.
+        """$1,109 of machines and $250 of disks are $1,359 today and $339 after: a saving of $1,020, 75%, in five rows.
 
         Page 1's figures, in the order it draws them: the headline's saving and share, the four figures with the
-        saving a year, the rows and their total, then what the cost today holds.
+        saving a year, the rows and their total, then what the cost today holds. Spot saves nothing on these clusters.
         """
-        first = finished(whole_estate()).pages[0]
-        # The Kubernetes section starts lower on the same page.
-        page = first[: first.index("Kubernetes")]
+        page = finished(whole_estate()).pages[0]
         figure = re.compile(r"\(?\u2212?\$[\d,]+\)?,?|\(?\d+%\)?")
         figures = [line for line in page if figure.fullmatch(line)]
-        expected = ["$896", "(66%)", "$1,359", "$463", "\u2212$896", "$10,752", "66%"]
-        rows = ["\u2212$540", "\u2212$139", "\u2212$217"]
-        self.assertEqual(figures, [*expected, *rows, "\u2212$896", "($1,109)", "($250),"])
+        expected = ["$1,020", "(75%)", "$1,359", "$339", "\u2212$1,020", "$12,240", "75%"]
+        rows = ["\u2212$540", "\u2212$139", "\u2212$124", "$0", "\u2212$217"]
+        self.assertEqual(figures, [*expected, *rows, "\u2212$1,020", "($1,109)", "($250),"])
 
 
 class AnonymizeTest(unittest.TestCase):
@@ -400,8 +398,9 @@ class AnonymizeTest(unittest.TestCase):
             with self.subTest(name):
                 self.assertRegex(plain, word(name))
                 self.assertNotRegex(hidden, word(name))
-        # The workloads a and b are also words of the report's own text, so their hashes are counted instead.
-        self.assertEqual(len(re.findall(r"(?<![\w-])wl-[0-9a-f]{8}(?![\w-])", hidden)), 4)
+        # The workloads a and b are also words of the report's own text, so their hashes are counted instead: the four
+        # workloads, and a and b again as the apps that run fewer copies at quiet times.
+        self.assertEqual(len(re.findall(r"(?<![\w-])wl-[0-9a-f]{8}(?![\w-])", hidden)), 6)
         for kept in ("westeurope", "eu-west-1", "m6i.large", "m6i.2xlarge"):
             with self.subTest(kept):
                 self.assertRegex(hidden, word(kept))

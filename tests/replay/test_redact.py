@@ -4,9 +4,9 @@ import json
 import unittest
 from typing import List
 
-from tests.replay.clusters import SMALL, SPREAD, container, node, pod
-from tests.replay.redact import Redactor, UnredactedOutput, kubeconfig, pod_page
-from zoorik.kubectl.objects import Json
+from tests.replay.clusters import SMALL, SPREAD, autoscaler, budget, container, node, pod
+from tests.replay.redact import Redactor, UnredactedOutput, kubeconfig, page_of
+from zoorik.kubectl.objects import BUDGETS, PODS, Json
 
 KUBECONFIG = """apiVersion: v1
 clusters:
@@ -22,6 +22,7 @@ users:
       args: [get-token, --login, azurecli]
 """
 PODS_PATH = "/api/v1/pods?limit=500"
+BUDGETS_PATH = "/apis/policy/v1/poddisruptionbudgets?limit=500"
 
 
 def raw_page(kind: str, items: List[Json], token: str = "") -> str:
@@ -34,6 +35,11 @@ def raw_page(kind: str, items: List[Json], token: str = "") -> str:
 def recorded_pod_page(items: List[Json], token: str = "") -> str:
     """Give a page of pods as a recording keeps it while the run goes on."""
     return Redactor().output(["kubectl", "get", "--raw", PODS_PATH], raw_page("PodList", items, token))
+
+
+def recorded_budget_page(items: List[Json]) -> str:
+    """Give a page of disruption budgets as a recording keeps it."""
+    return Redactor().output(["kubectl", "get", "--raw", BUDGETS_PATH], raw_page("PodDisruptionBudgetList", items))
 
 
 class RedactorTest(unittest.TestCase):
@@ -58,6 +64,28 @@ class RedactorTest(unittest.TestCase):
         names = [item["metadata"]["name"] for item in json.loads(output)["items"]]
         self.assertEqual(len(names), len(SMALL.objects["pods"]) - 2)
         self.assertNotIn("report-28099000-q9w8e", names)
+
+    def test_autoscalers_and_budgets_keep_only_their_allowlist(self) -> None:
+        """An autoscaler keeps its namespace and target, and a budget its namespace, selector and minAvailable."""
+        path = "/apis/autoscaling/v2/horizontalpodautoscalers?limit=500"
+        page = raw_page("HorizontalPodAutoscalerList", [autoscaler("shop", "web")])
+        output = json.loads(Redactor().output(["kubectl", "get", "--raw", path], page))
+        self.assertEqual(
+            output["items"],
+            [{"metadata": {"namespace": "shop"}, "spec": {"scaleTargetRef": {"kind": "Deployment", "name": "web"}}}],
+        )
+        budgets = json.loads(
+            recorded_budget_page([budget("shop", "web", {"matchLabels": {"app": "web"}}, minAvailable=1)])
+        )
+        self.assertEqual(
+            budgets["items"],
+            [
+                {
+                    "metadata": {"namespace": "shop"},
+                    "spec": {"selector": {"matchLabels": {"app": "web"}}, "minAvailable": 1},
+                }
+            ],
+        )
 
     def test_the_version_check_keeps_only_the_version(self) -> None:
         """Of the /version answer, only gitVersion is kept."""
@@ -88,7 +116,7 @@ class RedactorTest(unittest.TestCase):
 
 
 class NarrowTest(unittest.TestCase):
-    """Redactor.narrow_pod_pages and pod_page."""
+    """Redactor.narrow_pod_pages and page_of."""
 
     def test_a_clusters_pod_pages_are_narrowed_together(self) -> None:
         """A label that a spread constraint on one page selects is kept on the other page; other labels go."""
@@ -109,15 +137,25 @@ class NarrowTest(unittest.TestCase):
             ]
         )
         self.assertEqual(json.loads(first)["items"][0]["metadata"]["labels"], {"app": "web", "team": "one"})
-        narrowed = [json.loads(page) for page in Redactor().narrow_pod_pages([first, second])]
+        narrowed = [json.loads(page) for page in Redactor().narrow_pod_pages([first, second], [])]
         self.assertEqual(
             [page["items"][0]["metadata"]["labels"] for page in narrowed], [{"app": "web"}, {"app": "web"}]
         )
         self.assertEqual(narrowed[0]["metadata"], {"continue": "page1="})
         self.assertEqual([page["kind"] for page in narrowed], ["PodList", "PodList"])
 
+    def test_a_label_a_budget_selects_on_is_kept(self) -> None:
+        """A key that a disruption budget's selector uses is kept on every pod; a budget's page is told apart."""
+        labels = {"app": "web", "team": "one", "tier": "front"}
+        pods = recorded_pod_page([pod("shop", "web-one", "node-one", [container("app")], labels=labels)])
+        budgets = recorded_budget_page([budget("shop", "web", {"matchLabels": {"team": "one"}}, minAvailable=1)])
+        narrowed = json.loads(Redactor().narrow_pod_pages([pods], [budgets])[0])
+        self.assertEqual(narrowed["items"][0]["metadata"]["labels"], {"team": "one"})
+        self.assertTrue(page_of(budgets, BUDGETS))
+        self.assertFalse(page_of(budgets, PODS))
+
     def test_pod_pages_are_told_apart(self) -> None:
         """Only a page of pods is a pod page; a page of nodes and a top table are not."""
-        self.assertTrue(pod_page(recorded_pod_page([])))
-        self.assertFalse(pod_page('{"items": [], "kind": "NodeList"}'))
-        self.assertFalse(pod_page("shop   web-6d4b75cb6d-abcde   app   120m   200Mi\n"))
+        self.assertTrue(page_of(recorded_pod_page([]), PODS))
+        self.assertFalse(page_of('{"items": [], "kind": "NodeList"}', PODS))
+        self.assertFalse(page_of("shop   web-6d4b75cb6d-abcde   app   120m   200Mi\n", PODS))

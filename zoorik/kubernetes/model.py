@@ -1,12 +1,13 @@
 """The Kubernetes part's values: each cluster as the steps see it, and what the part found on it.
 
-A cluster's state is its pools, the machines of each pool, and the pods on those machines. Each pool's machines come
-in lines: machines of one type, bought one way, at one price. Requests are in scheduler units: CPU in millicores,
-memory and every other resource in whole units, and one pod slot under "pods".
+A cluster's state is its pools, the machines of each pool, and the pods on those machines, and, once apps run fewer
+copies at quiet times, the machines and pods of those hours. Each pool's machines come in lines: machines of one type,
+bought one way, at one price. Requests are in scheduler units: CPU in millicores, memory and every other resource in
+whole units, and one pod slot under "pods".
 """
 
 from dataclasses import dataclass
-from typing import Dict, Mapping, Optional, Tuple
+from typing import Dict, Mapping, Optional, Sequence, Tuple
 
 from zoorik.cloud.aws import Ec2Instance, NodeGroup
 from zoorik.cloud.azure import AgentPool
@@ -21,6 +22,8 @@ DAEMON_SET = "DaemonSet"
 
 # A resource list, such as a pod's request, in scheduler units.
 Resources = Mapping[str, int]
+# A line's machines are counted by pool id, machine type and capacity.
+LineKey = Tuple[str, Optional[str], Optional[Capacity]]
 
 
 @dataclass(frozen=True)
@@ -57,6 +60,10 @@ class Line:
     # The hourly list price, at spot for machines on spot; None when there is none, with the reason in note.
     hourly: Optional[float]
     note: str
+    # The hourly spot price its machines are counted at during quiet times; None while they stay at hourly.
+    spot: Optional[float] = None
+    # Why its machines stay at hourly during quiet times though they could run spot, such as no spot price.
+    spot_note: str = ""
 
 
 @dataclass(frozen=True)
@@ -141,20 +148,39 @@ class Pod:
 
 
 @dataclass(frozen=True)
+class QuietHours:
+    """The machines that run at quiet times, 12 hours a day, and the pods on them, with apps at fewer copies."""
+
+    machines: Tuple[Machine, ...]
+    pods: Tuple[Pod, ...]
+
+
+def counted(machines: Sequence[Machine]) -> Dict[LineKey, int]:
+    """Count machines by line: pool id, machine type and capacity."""
+    counts: Dict[LineKey, int] = {}
+    for machine in machines:
+        key = (machine.pool, machine.machine_type, machine.capacity)
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+@dataclass(frozen=True)
 class ClusterState:
     """A cluster as a step leaves it: its pools, their machines, and the pods on those machines."""
 
     pools: Tuple[Pool, ...]
     machines: Tuple[Machine, ...]
     pods: Tuple[Pod, ...]
+    # The quiet hours' machines and pods once apps run fewer copies then; None while the same machines run all day.
+    quiet: Optional[QuietHours] = None
 
-    def counts(self) -> Dict[Tuple[str, Optional[str], Optional[Capacity]], int]:
-        """Count the machines of each line, by pool id, machine type and capacity."""
-        counts: Dict[Tuple[str, Optional[str], Optional[Capacity]], int] = {}
-        for machine in self.machines:
-            key = (machine.pool, machine.machine_type, machine.capacity)
-            counts[key] = counts.get(key, 0) + 1
-        return counts
+    def counts(self) -> Dict[LineKey, int]:
+        """Count the machines of each line."""
+        return counted(self.machines)
+
+    def quiet_counts(self) -> Dict[LineKey, int]:
+        """Count the machines of each line at quiet times."""
+        return self.counts() if self.quiet is None else counted(self.quiet.machines)
 
 
 @dataclass(frozen=True)
@@ -163,6 +189,8 @@ class StepResult:
 
     name: str
     row: str
+    # The assumption its figure rests on, stated beside it; "" for none.
+    assumption: str
     before: int
     after: int
 
@@ -185,6 +213,12 @@ class LineResult:
     note: str
     today: int
     after: int
+    # Its machines at quiet times, after the steps.
+    quiet: int
+    # The hourly spot price its machines are counted at during quiet times, and why they stay regular when they could
+    # run spot; None and "" when neither applies.
+    spot: Optional[float]
+    spot_note: str
     # An unpriced line counts in neither total, so its costs are 0.
     cost_today: int
     cost_after: int
@@ -207,13 +241,25 @@ class WorkloadResult:
 
 
 @dataclass(frozen=True)
+class AppResult:
+    """An app that runs fewer copies at quiet times: its copies today and at quiet times."""
+
+    kind: str
+    namespace: str
+    name: str
+    copies: int
+    quiet: int
+
+
+@dataclass(frozen=True)
 class ClusterResult:
-    """What the part found on one cluster: its lines, the steps' figures, and each workload's share."""
+    """What the part found on one cluster: its lines, the steps' figures, each workload's share and the apps counted."""
 
     cluster: ClusterId
     lines: Tuple[LineResult, ...]
     steps: Tuple[StepResult, ...]
     workloads: Tuple[WorkloadResult, ...]
+    apps: Tuple[AppResult, ...]
     # The pods nothing would recreate, which stay on their nodes.
     bare_pods: int
     # Fargate and virtual nodes: not machines the run counts.
@@ -222,6 +268,8 @@ class ClusterResult:
     usage: Optional[str]
     # Why cheaper machine types couldn't be counted on the cluster; None when they could, or no pool could change.
     cheaper_types: Optional[str]
+    # Why fewer copies at quiet times couldn't be counted on the cluster; None when they could.
+    fewer_copies: Optional[str]
 
     @property
     def today(self) -> int:

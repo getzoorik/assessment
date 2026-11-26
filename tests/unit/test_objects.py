@@ -12,6 +12,8 @@ from tests.replay.clusters import (
     SPREAD,
     SPREAD_PREFERRED,
     WEB_LABELS,
+    autoscaler,
+    budget,
     container,
     node,
     owner,
@@ -20,20 +22,25 @@ from tests.replay.clusters import (
 )
 from zoorik.cloud.fields import Record
 from zoorik.errors import UnexpectedResponse
-from zoorik.kubectl.api import Snapshot, snapshot
+from zoorik.kubectl.api import Scaling, Snapshot, snapshot
 from zoorik.kubectl.objects import (
     ADDON_MODE,
+    AUTOSCALER,
+    BUDGET,
     JQ_HELPERS,
     KINDS,
     NODE,
     POD,
     PODS,
     REQUIRED,
+    SCALING_KINDS,
     VOLUME,
     WHOLE,
     AffinityTerm,
+    Autoscaler,
     Container,
     CsiNode,
+    DisruptionBudget,
     Each,
     Fields,
     FoldedKeys,
@@ -57,7 +64,8 @@ from zoorik.kubectl.objects import (
     Toleration,
     jq,
     jq_filter,
-    placement_label_keys,
+    label_keys,
+    read_budget,
     read_volume,
     slim,
     slim_page,
@@ -81,8 +89,11 @@ def page(kind_name: str, items: List[Json], token: str = "") -> Json:
 
 def read_small() -> Snapshot:
     """Read the small cluster's objects as the direct read keeps them, each kind's list in one page."""
-    kept = {kind.name: slim_page(page(kind.list_kind, list(SMALL.objects[kind.name])), kind).items for kind in KINDS}
-    return snapshot(kept, NO_USAGE)
+    kept = {
+        kind.name: slim_page(page(kind.list_kind, list(SMALL.objects[kind.name])), kind).items
+        for kind in (*KINDS, *SCALING_KINDS)
+    }
+    return snapshot({kind.name: kept[kind.name] for kind in KINDS}, kept, NO_USAGE)
 
 
 def pods_by_name(read: Snapshot) -> Dict[str, Pod]:
@@ -146,6 +157,18 @@ class SlimTest(unittest.TestCase):
             },
         )
 
+    def test_an_autoscaler_and_a_budget_keep_only_their_allowed_fields(self) -> None:
+        """An autoscaler keeps its namespace and target's kind and name; a budget its namespace, selector and floor."""
+        self.assertEqual(
+            slim(autoscaler("shop", "web", "Rollout"), AUTOSCALER, "horizontalpodautoscalers[0]"),
+            {"metadata": {"namespace": "shop"}, "spec": {"scaleTargetRef": {"kind": "Rollout", "name": "web"}}},
+        )
+        selector = {"matchLabels": {"tier": "front"}}
+        self.assertEqual(
+            slim(budget("shop", "web", selector, minAvailable="50%", maxUnavailable=1), BUDGET, "budgets[0]"),
+            {"metadata": {"namespace": "shop"}, "spec": {"selector": selector, "minAvailable": "50%"}},
+        )
+
     def test_a_list_keeps_only_the_items_whose_where_field_is_set(self) -> None:
         """With where, an item is kept when that field is there and not false, as jq's select keeps it."""
         rule = Each(Fields({"name": WHOLE}), where="controller")
@@ -189,7 +212,7 @@ class SlimPageTest(unittest.TestCase):
         """Pods that ended, and ReplicaSets and Jobs with no controller owner, are left out."""
         kept = {
             kind.name: len(slim_page(page(kind.list_kind, list(SMALL.objects[kind.name])), kind).items)
-            for kind in KINDS
+            for kind in (*KINDS, *SCALING_KINDS)
         }
         self.assertEqual(
             kept,
@@ -202,6 +225,8 @@ class SlimPageTest(unittest.TestCase):
                 "persistentvolumes": 4,
                 "csinodes": 2,
                 "limitranges": 1,
+                "horizontalpodautoscalers": 1,
+                "poddisruptionbudgets": 2,
             },
         )
 
@@ -228,14 +253,15 @@ class JqTest(unittest.TestCase):
         self.assertIn("| select((.metadata.ownerReferences // []) | length > 0)]", jq_filter(KINDS[2]))
 
     def test_the_pods_filter_narrows_their_labels(self) -> None:
-        """The pods' filter names the keys placement uses, then keeps only those labels."""
+        """The pods' filter names the keys placement and the budgets in $b use, then keeps only those labels."""
         pods = jq_filter(PODS)
+        self.assertIn("+ [$b[][] | (.spec.selector // empty) | sk[]] ", pods)
         self.assertIn(f'+ ["{ADDON_MODE}"] | map({{(.): true}}) | add) as $keep', pods)
         self.assertTrue(pods.endswith("with_entries(select($keep[.key])) else . end]"))
 
     def test_no_filter_holds_a_single_quote(self) -> None:
         """Each filter goes inside single quotes in the shell script, so none holds one."""
-        self.assertEqual([kind.name for kind in KINDS if "'" in jq_filter(kind)], [])
+        self.assertEqual([kind.name for kind in (*KINDS, *SCALING_KINDS) if "'" in jq_filter(kind)], [])
 
 
 class ReadTest(unittest.TestCase):
@@ -281,7 +307,9 @@ class ReadTest(unittest.TestCase):
             owners=[owner("Workflow", "flow-one", controller=False), owner("ReplicaSet", "batch-7c9d8b")],
         )
         kept = slim_page(page("PodList", [two_owners]), PODS).items
-        read = snapshot({**{kind.name: [] for kind in KINDS}, "pods": kept}, NO_USAGE)
+        read = snapshot(
+            {**{kind.name: [] for kind in KINDS}, "pods": kept}, {kind.name: [] for kind in SCALING_KINDS}, NO_USAGE
+        )
         self.assertEqual(read.pods[0].controller, OwnerRef("ReplicaSet", "batch-7c9d8b"))
         self.assertEqual(self.pods["web-6d4b75cb6d-abcde"].controller, OwnerRef("ReplicaSet", "web-6d4b75cb6d"))
         self.assertIsNone(self.pods["step-one"].controller)
@@ -419,6 +447,31 @@ class ReadTest(unittest.TestCase):
             ),
         )
 
+    def test_autoscalers_and_budgets_are_read(self) -> None:
+        """An autoscaler names its target; a budget its selector and a whole-number floor, else none."""
+        self.assertEqual(
+            self.read.scaling,
+            Scaling(
+                (Autoscaler("shop", "Deployment", "web"),),
+                (
+                    DisruptionBudget("shop", LabelSelector({"tier": "front"}, ()), 1),
+                    DisruptionBudget("shop", LabelSelector({"role": "db"}, ()), None),
+                ),
+                None,
+            ),
+        )
+
+        def read(raw: Json) -> DisruptionBudget:
+            """Read a budget as slim keeps it."""
+            return read_budget(Record(slim(raw, BUDGET, "budgets[0]"), "budgets[0]"))
+
+        self.assertEqual(read(budget("shop", "web", None, minAvailable="50%")), DisruptionBudget("shop", None, None))
+        self.assertEqual(
+            read(budget("shop", "web", {}, minAvailable=3)), DisruptionBudget("shop", LabelSelector({}, ()), 3)
+        )
+        with self.assertRaisesRegex(UnexpectedResponse, r"minAvailable is not a whole number or a text$"):
+            read(budget("shop", "web", {}, minAvailable=1.5))
+
     def test_two_tier_keys_name_one_tier_only_when_they_agree(self) -> None:
         """The two tier keys with one value give it; with two values, the volume names no tier."""
 
@@ -432,24 +485,29 @@ class ReadTest(unittest.TestCase):
         self.assertIsNone(tier({"cachingMode": "ReadOnly"}))
 
 
-class PlacementLabelsTest(unittest.TestCase):
-    """The pod labels placement uses."""
+class LabelsTest(unittest.TestCase):
+    """The pod labels the run reads."""
 
-    def test_the_keys_come_from_required_placement_terms(self) -> None:
-        """DoNotSchedule spread and required affinity terms name the keys; preferences name none."""
+    def test_the_keys_come_from_required_placement_terms_and_budgets(self) -> None:
+        """DoNotSchedule spread, required affinity terms and budgets' selectors name the keys; preferences name none."""
+        read = read_small()
         self.assertEqual(
-            placement_label_keys(read_small().pods),
-            frozenset({"app", "pod-template-hash", "version", "role", "track", ADDON_MODE}),
+            label_keys(read.pods, ()), frozenset({"app", "pod-template-hash", "version", "role", "track", ADDON_MODE})
+        )
+        self.assertEqual(
+            label_keys(read.pods, read.scaling.budgets),
+            frozenset({"app", "pod-template-hash", "version", "role", "track", "tier", ADDON_MODE}),
         )
 
-    def test_a_label_no_required_placement_term_uses_is_dropped(self) -> None:
-        """Each pod keeps only the labels whose keys a required term of some pod uses, and the add-on manager's mode."""
+    def test_a_label_no_required_placement_term_or_budget_uses_is_dropped(self) -> None:
+        """Each pod keeps only the labels whose keys a required term or a budget uses, and the add-on manager's mode."""
         labels = {item.name: item.labels for item in read_small().pods}
+        web = {"app": "web", "pod-template-hash": "6d4b75cb6d", "version": "v2", "tier": "front"}
         self.assertEqual(
             labels,
             {
-                "web-6d4b75cb6d-abcde": {"app": "web", "pod-template-hash": "6d4b75cb6d", "version": "v2"},
-                "web-6d4b75cb6d-fghij": {"app": "web", "pod-template-hash": "6d4b75cb6d", "version": "v2"},
+                "web-6d4b75cb6d-abcde": web,
+                "web-6d4b75cb6d-fghij": web,
                 "agent-x2k4p": {"app": "agent"},
                 "kube-proxy-node-two": {ADDON_MODE: "Reconcile"},
                 "report-28100000-x7k2p": {"app": "report-28100000-x7k2p"},

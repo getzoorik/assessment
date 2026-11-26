@@ -70,6 +70,8 @@ class RecordTest(unittest.TestCase):
         self.assertEqual(record.record("profile").text("mode"), "System")
         self.assertEqual([pool.text("name") for pool in record.records("pools")], ["system", "user"])
         self.assertEqual([term.text("unit") for term in record.keyed_records("terms")], ["Hrs"])
+        self.assertEqual(record.optional_whole_or_text("count"), 3)
+        self.assertEqual(record.optional_whole_or_text("name"), "cluster-one")
 
     def test_a_missing_or_null_required_field_is_unexpected(self) -> None:
         """A required field that is left out or null is named by its path."""
@@ -83,6 +85,7 @@ class RecordTest(unittest.TestCase):
         for key in ("absent", "nothing"):
             self.assertIsNone(record.optional_text(key))
             self.assertIsNone(record.optional_integer(key))
+            self.assertIsNone(record.optional_whole_or_text(key))
             self.assertIsNone(record.optional_number(key))
             self.assertIsNone(record.optional_flag(key))
             self.assertIsNone(record.optional_record(key))
@@ -98,6 +101,8 @@ class RecordTest(unittest.TestCase):
             (lambda: record.text("count"), r"answer\.count is not a text"),
             (lambda: record.integer("private"), r"answer\.private is not a whole number"),
             (lambda: record.integer("price"), r"answer\.price is not a whole number"),
+            (lambda: record.optional_whole_or_text("private"), r"answer\.private is not a whole number or a text"),
+            (lambda: record.optional_whole_or_text("price"), r"answer\.price is not a whole number or a text"),
             (lambda: record.number("private"), r"answer\.private is not a number"),
             (lambda: record.flag("name"), r"answer\.name is not true or false"),
             (lambda: record.record("name"), r"answer\.name is not an object"),

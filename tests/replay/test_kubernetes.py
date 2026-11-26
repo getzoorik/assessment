@@ -14,7 +14,7 @@ from zoorik.cloud.aws import AwsCli
 from zoorik.cloud.azure import AzureCli
 from zoorik.cloud.cli import Host
 from zoorik.cloud.started import StartedCommands
-from zoorik.kubectl.direct import KUBELOGIN_MISSING, UNREACHABLE, DirectKubeApi
+from zoorik.kubectl.direct import DOCS, KUBELOGIN_MISSING, UNREACHABLE, DirectKubeApi
 from zoorik.kubectl.invoke import InvokeKubeApi
 from zoorik.kubernetes.assessment import ClusterCloud, KubernetesAssessment, aws_clusters, azure_clusters
 from zoorik.kubernetes.discovery import INVOKE_OFF, NO_INVOKE, PRIVATE_ENDPOINT, STOPPED_REASON, Readers
@@ -23,6 +23,8 @@ from zoorik.pricing.machines import AwsMachinePrices, AzureMachinePrices
 
 PART = "Kubernetes"
 BY_NAME = {scenario.name: scenario for scenario in SCENARIOS}
+FEWER = "Fewer copies at quiet times"
+ACCESS_DENIED = f"access denied (it needs cluster-wide read access; {DOCS})"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -94,10 +96,12 @@ class KubernetesGoldenTest(unittest.TestCase):
 class WorkedFigureTest(unittest.TestCase):
     """The figure the plan works out by hand, on a cluster read with kubectl."""
 
-    def test_a_public_cluster_goes_from_730_to_438_split_134_and_158_then_to_372(self) -> None:
+    def test_a_public_cluster_goes_from_730_to_438_split_134_and_158_then_to_372_and_248(self) -> None:
         """Step 1 saves $0, step 2 $292 split $134 and $158, step 3 $66: the System pool's three on F4s v2.
 
-        Step 4 saves $0, since the cluster's one pool holds its pods on as few machines as it can already.
+        Step 4 saves $0, since the cluster's one pool holds its pods on as few machines as it can already. Step 5 saves
+        $124: A's 8 copies and B's 4 drop to 2 each at quiet times, on one F4s v2. Step 6 saves $0: a System pool stays
+        regular.
         """
         cluster = only_cluster("aks-public")
         figures = [(step.name, step.before, step.after, step.saving) for step in cluster.steps]
@@ -108,11 +112,14 @@ class WorkedFigureTest(unittest.TestCase):
                 ("Spare machines", 730, 438, 292),
                 ("Cheaper machine types", 438, 372, 66),
                 ("Packing across pools", 372, 372, 0),
+                ("Fewer copies at quiet times", 372, 248, 124),
+                ("Spot", 248, 248, 0),
             ],
         )
-        lines = [(line.machine_type, line.today, line.after, line.cost_after) for line in cluster.lines]
-        self.assertEqual(lines, [("Standard_D4s_v5", 5, 0, 0), ("Standard_F4s_v2", 0, 3, 372)])
+        lines = [(line.machine_type, line.today, line.after, line.quiet, line.cost_after) for line in cluster.lines]
+        self.assertEqual(lines, [("Standard_D4s_v5", 5, 0, 0, 0), ("Standard_F4s_v2", 0, 3, 1, 248)])
         self.assertEqual([(each.name, each.share) for each in cluster.workloads], [("a", 134), ("b", 158)])
+        self.assertEqual([(each.name, each.copies, each.quiet) for each in cluster.apps], [("a", 8, 2), ("b", 4, 2)])
         self.assertIsNone(cluster.cheaper_types)
 
     def test_nodes_off_the_reservation_rule_get_no_step_3_named(self) -> None:
@@ -124,6 +131,47 @@ class WorkedFigureTest(unittest.TestCase):
                 self.assertEqual((step_3.name, step_3.saving), ("Cheaper machine types", 0))
                 reason = "the allocatable memory of its Standard_D4s_v5 nodes doesn't follow the platform's reservation"
                 self.assertEqual(cluster.cheaper_types, reason)
+
+
+class QuietHoursTest(unittest.TestCase):
+    """Steps 5 and 6 on a cluster read with kubectl, with its autoscalers and disruption budgets."""
+
+    def test_fewer_copies_then_spot_take_730_to_657_then_to_482(self) -> None:
+        """The app web drops to 2 copies and cart to 3, its budget's floor; api keeps the 4 its autoscaler sets.
+
+        The pool apps' four machines are three at quiet times, which then run spot; the System pool's one stays regular.
+        """
+        cluster = only_cluster("aks-quiet-hours")
+        figures = [(step.name, step.before, step.after, step.saving) for step in cluster.steps]
+        self.assertEqual(
+            figures,
+            [
+                ("Smaller pods", 1022, 1022, 0),
+                ("Spare machines", 1022, 730, 292),
+                ("Cheaper machine types", 730, 730, 0),
+                ("Packing across pools", 730, 730, 0),
+                ("Fewer copies at quiet times", 730, 657, 73),
+                ("Spot", 657, 482, 175),
+            ],
+        )
+        lines = [(line.pool, line.today, line.after, line.quiet, line.spot, line.cost_after) for line in cluster.lines]
+        self.assertEqual(lines, [("apps", 6, 4, 3, 0.04, 336), ("system", 1, 1, 1, None, 146)])
+        self.assertEqual(
+            [(each.name, each.copies, each.quiet) for each in cluster.apps], [("cart", 4, 3), ("web", 4, 2)]
+        )
+        self.assertIsNone(cluster.fewer_copies)
+
+    def test_unread_budgets_and_no_spot_price_count_neither_step_and_say_why(self) -> None:
+        """With its disruption budgets refused, no app runs fewer copies; with no spot price, machines stay regular."""
+        cluster = only_cluster("aks-quiet-hours-not-counted")
+        self.assertEqual([(step.name, step.saving) for step in cluster.steps[4:]], [(FEWER, 0), ("Spot", 0)])
+        self.assertEqual(cluster.fewer_copies, f"cannot list poddisruptionbudgets.policy: {ACCESS_DENIED}")
+        self.assertEqual(cluster.apps, ())
+        apps = cluster.lines[0]
+        self.assertEqual(
+            (apps.pool, apps.quiet, apps.spot, apps.spot_note),
+            ("apps", 4, None, "no spot price for Standard_D4s_v5 in westeurope"),
+        )
 
 
 class ReadMethodTest(unittest.TestCase):
@@ -176,7 +224,8 @@ class NodeKindsTest(unittest.TestCase):
 
         The spot pools stay on m6i.large, the cheapest type that holds their pods at spot prices too. Then every pod
         fits the room of the two spot machines, the cheapest per share: burst and apps-on-demand go, and neither spot
-        pool gains a machine. Burst's m6i.large, which step 3 added and step 4 emptied, is no line.
+        pool gains a machine. Burst's m6i.large, which step 3 added and step 4 emptied, is no line. No app has 3 copies,
+        and the machines left run spot already, so steps 5 and 6 save nothing.
         """
         cluster = only_cluster("eks-node-kinds")
         lines = [
@@ -193,7 +242,15 @@ class NodeKindsTest(unittest.TestCase):
             ],
         )
         figures = [(step.name, step.before, step.after) for step in cluster.steps]
-        self.assertEqual(figures[-2:], [("Cheaper machine types", 277, 204), ("Packing across pools", 204, 58)])
+        self.assertEqual(
+            figures[2:],
+            [
+                ("Cheaper machine types", 277, 204),
+                ("Packing across pools", 204, 58),
+                (FEWER, 58, 58),
+                ("Spot", 58, 58),
+            ],
+        )
         self.assertEqual((cluster.today, cluster.after, cluster.not_machines), (379, 58, 1))
         shares = {each.name: each.share for each in cluster.workloads}
         self.assertEqual(shares, {"report": 0, "tools": 0, "web": 150, "worker": 98})

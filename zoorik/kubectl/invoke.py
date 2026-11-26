@@ -9,14 +9,14 @@ import base64
 import dataclasses
 import gzip
 import zlib
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 from zoorik.cloud.azure import AksCluster, AzureCli
 from zoorik.cloud.fields import parse_json
-from zoorik.errors import ClusterUnreadable, UnexpectedResponse
+from zoorik.errors import AssessmentError, ClusterUnreadable, UnexpectedResponse
 from zoorik.kubectl.api import PAGE_SIZE, REQUEST_TIMEOUT, Snapshot, snapshot
 from zoorik.kubectl.direct import failure, listing_failure
-from zoorik.kubectl.objects import KINDS, Json, Kind, jq_filter
+from zoorik.kubectl.objects import BUDGETS, KINDS, PODS, SCALING_KINDS, Json, Kind, jq_filter
 from zoorik.kubectl.usage import SAMPLE_INTERVAL, SampleWindow, Usage, top_table, usage_of
 
 # The time the reads take besides the window: every kind's list, and the answer's way back through Azure.
@@ -28,16 +28,19 @@ MARK = "@@"
 BEGIN = f"{MARK}begin"
 END = f"{MARK}end"
 USAGE = "usage"
-# Runs a command as one section: its name, then what it printed, or ! and the start of its error when it failed.
+# Runs a command as one section: its name, then what it printed, or ! and the start of its error when it failed. What
+# it printed stays in a file of the section's name, for a later section to read.
 SECTION = (
-    r's(){ n=$1; shift; echo "@@$n"; if "$@" >"$d/o" 2>"$d/e"; then cat "$d/o"; '
+    r's(){ n=$1; shift; echo "@@$n"; if "$@" >"$d/$n" 2>"$d/e"; then cat "$d/$n"; '
     r"""else printf '!%s\n' "$(head -c 300 "$d/e" | tr '\n' ' ')"; fi; }"""
 )
-# Lists one kind and keeps of it what its jq filter keeps.
+# Lists one kind and keeps of it what jq keeps, run with the arguments after the kind.
 LIST = (
-    f'g(){{ kubectl get "$1" -A -o json --chunk-size={PAGE_SIZE} --request-timeout={REQUEST_TIMEOUT} >"$d/j" '
-    f'&& jq -c "$2" "$d/j"; }}'
+    f'g(){{ r=$1; shift; kubectl get "$r" -A -o json --chunk-size={PAGE_SIZE} --request-timeout={REQUEST_TIMEOUT} '
+    f'>"$d/j" && jq -c "$@" "$d/j"; }}'
 )
+# The disruption budgets are listed first, because the pods' labels are narrowed to the keys their selectors use.
+LISTED = (*SCALING_KINDS, *KINDS)
 # Keeps each container's highest CPU and memory over the samples. kubectl top always writes CPU in m and memory in Mi;
 # any other line passes through, for the reader to refuse.
 PEAK_AWK = (
@@ -59,9 +62,15 @@ def sampler(window: SampleWindow) -> str:
     )
 
 
+def listing(kind: Kind) -> str:
+    """Write the command that lists kind; the one for pods gives jq the budgets' section as $b."""
+    budgets = f' --slurpfile b "$d/{BUDGETS.name}"' if kind is PODS else ""
+    return f"g {kind.resource}{budgets} '{jq_filter(kind)}'"
+
+
 def script(window: SampleWindow) -> str:
     """Write the one shell line that reads every kind and the window's peaks and prints them in gzip and base64."""
-    sections = [f"s {kind.name} g {kind.resource} '{jq_filter(kind)}'" for kind in KINDS]
+    sections = [f"s {kind.name} {listing(kind)}" for kind in LISTED]
     body = "; ".join([*sections, f"s {USAGE} t"])
     return "; ".join(
         [
@@ -121,6 +130,14 @@ def kind_items(kind: Kind, text: str) -> List[Json]:
     return items
 
 
+def scaling_items(kind: Kind, text: str) -> Union[List[Json], str]:
+    """Read the section of a kind the cluster is read without: its kept items, or the reason it couldn't be listed."""
+    try:
+        return kind_items(kind, text)
+    except AssessmentError as error:
+        return str(error)
+
+
 def usage_section(text: str) -> Usage:
     """Read the usage section: the window's peaks, outside the command-invoke pod's namespace, or why there are none."""
     if text.startswith("!"):
@@ -142,5 +159,6 @@ class InvokeKubeApi:
         logs = self._azure.invoke(self._cluster, script(window), window.seconds + INVOKE_READ_SECONDS)
         sections = sections_of(logs)
         items = {kind.name: kind_items(kind, section(sections, kind.name)) for kind in KINDS}
-        read = snapshot(items, usage_section(section(sections, USAGE)))
+        scaling = {kind.name: scaling_items(kind, section(sections, kind.name)) for kind in SCALING_KINDS}
+        read = snapshot(items, scaling, usage_section(section(sections, USAGE)))
         return dataclasses.replace(read, pods=tuple(pod for pod in read.pods if pod.namespace != INVOKE_NAMESPACE))

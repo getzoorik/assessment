@@ -13,8 +13,8 @@ from dataclasses import dataclass
 from typing import List, Mapping, Optional, Sequence
 
 from tests.replay.clusters import Cluster, TopFailure
-from zoorik.kubectl.invoke import script
-from zoorik.kubectl.objects import KINDS, Json, Kind
+from zoorik.kubectl.invoke import LISTED, script
+from zoorik.kubectl.objects import Json, Kind
 from zoorik.kubectl.usage import SampleWindow
 
 SHELL = "/bin/sh"
@@ -86,7 +86,7 @@ def run_script(
         os.symlink(found, os.path.join(tools, tool))
     write(os.path.join(tools, "kubectl"), STUB_KUBECTL, 0o755)
     write(os.path.join(tools, "sleep"), STUB_SLEEP, 0o755)
-    for kind in KINDS:
+    for kind in LISTED:
         if kind.name in failed:
             write(os.path.join(stub, f"{kind.resource}.err"), failed[kind.name])
         else:

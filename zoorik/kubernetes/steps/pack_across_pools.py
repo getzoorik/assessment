@@ -35,15 +35,19 @@ class PackAcrossPools:
 
     name = "Packing across pools"
     row = SHARED_ROW
+    assumption = ""
 
     def apply(self, state: ClusterState) -> ClusterState:
         """Pack the moving pods across the priced pools; the state as it was when that saves nothing."""
-        packed = across(state)
+        packed = across(state, grow=True)
         return packed if packed is not None and cost(packed) < cost(state) else state
 
 
-def across(state: ClusterState) -> Optional[ClusterState]:
-    """Give the state with the moving pods packed across the priced pools; None when they need more than the cap."""
+def across(state: ClusterState, *, grow: bool) -> Optional[ClusterState]:
+    """Give the state with the moving pods packed across the priced pools; None when they need more than the cap.
+
+    Only with grow may a pool take new machines; without it the pods are packed onto the machines the pools have.
+    """
     pools = [pool for pool in state.pools if pool.priced]
     ids = {pool.id for pool in pools}
     machines = [machine for machine in state.machines if machine.pool in ids]
@@ -55,7 +59,8 @@ def across(state: ClusterState) -> Optional[ClusterState]:
     kept = {pod.node for pod in pods if pod.key in staying}
     opened = tuple(machine for machine in machines if machine.name in kept)
     own = [machine for machine in machines if machine.name not in kept]
-    candidates = ranked(pools, own, new_machines(machines, moving, overhead), moving, overhead)
+    new = new_machines(machines, moving, overhead) if grow else []
+    candidates = ranked(pools, own, new, moving, overhead)
     by_name = {machine.name: machine for machine in state.machines}
     others = tuple(machine for machine in state.machines if machine.pool not in ids)
     job = Job(

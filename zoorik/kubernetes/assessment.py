@@ -2,10 +2,12 @@
 
 Each cluster is read the way its settings choose, a few at a time. The machine types of each region with a pool whose
 type may change are read once, and each such pool's candidates are planned. Machines and candidates are priced at list
-prices, at spot for a pool on spot today, and the steps run on each cluster in order. A cluster that can't be read, a
-line that can't be priced and a cluster whose cheaper machine types can't be counted are named with the reason.
+prices, at spot for a pool on spot today, and at spot too for the quiet hours of step 6; the steps run on each cluster
+in order. A cluster that can't be read, a line that can't be priced, and a cluster whose cheaper machine types or
+fewer copies can't be counted are named with the reason.
 """
 
+from collections import Counter
 from dataclasses import dataclass, replace
 from typing import Dict, List, Mapping, Optional, Sequence, Set, Tuple, Union
 
@@ -21,6 +23,7 @@ from zoorik.kubernetes.catalogue import AwsCatalogue, AzureCatalogue, MachineCat
 from zoorik.kubernetes.collect import NO_CONTROLLER, Collected, collect
 from zoorik.kubernetes.discovery import AksSource, ClusterSource, EksSource, Found, Readers, Target
 from zoorik.kubernetes.model import (
+    AppResult,
     ClusterId,
     ClusterRead,
     ClusterResult,
@@ -33,9 +36,11 @@ from zoorik.kubernetes.model import (
 from zoorik.kubernetes.shares import workload_results
 from zoorik.kubernetes.steps import SHARED_ROW, Pipeline, line_cost
 from zoorik.kubernetes.steps.cheaper_types import CheaperTypes, Offer, Plan, Search, plans, searchable
+from zoorik.kubernetes.steps.fewer_copies import FewerCopies
 from zoorik.kubernetes.steps.pack_across_pools import PackAcrossPools
 from zoorik.kubernetes.steps.smaller_pods import SmallerPods
 from zoorik.kubernetes.steps.spare_machines import SpareMachines
+from zoorik.kubernetes.steps.spot import Spot
 from zoorik.pricing.machines import Capacity, MachinePrices
 from zoorik.system.workers import parallel
 
@@ -165,12 +170,13 @@ class KubernetesAssessment:
     def _prices(self, assessed: Sequence[Reading], planned: Mapping[ClusterId, Planned]) -> Dict[PriceKey, Price]:
         """Price each machine type, and each candidate, once per region and capacity, a few at a time.
 
-        Each region's price list is read first, in as few calls as it allows. A price list that can't be read is named
-        once for each cloud.
+        A type bought at the regular price is priced at spot too, for step 6. Each region's price list is read first,
+        in as few calls as it allows. A price list that can't be read is named once for each cloud.
         """
         found: Set[PriceKey] = set()
         for each in assessed:
             found |= price_keys(each) | candidate_keys(each.cluster, planned.get(each.cluster, {}))
+        found |= {(key[0], key[1], key[2], Capacity.SPOT) for key in found if key[3] is Capacity.REGULAR}
         keys = sorted(found, key=lambda key: (key[0], key[1], key[2], key[3].value))
         regions: Dict[Tuple[str, str], Set[str]] = {}
         for cloud, region, machine_type, _ in keys:
@@ -266,6 +272,15 @@ def searches(cluster: ClusterId, planned: Mapping[str, Plan], prices: Mapping[Pr
     return found
 
 
+def spot_prices(cluster: ClusterId, prices: Mapping[PriceKey, Price]) -> Dict[str, Price]:
+    """Give each machine type's spot price in a cluster's region, or why it has none."""
+    return {
+        machine_type: price
+        for (cloud, region, machine_type, capacity), price in prices.items()
+        if (cloud, region, capacity) == (cluster.cloud, cluster.region, Capacity.SPOT)
+    }
+
+
 def priced(cluster: ClusterId, state: ClusterState, prices: Mapping[PriceKey, Price]) -> ClusterState:
     """Give the state with each line's hourly price, or why it has none."""
 
@@ -284,14 +299,15 @@ def line_results(today: ClusterState, after: ClusterState) -> Tuple[LineResult, 
     """Give each line's machines and cost a month, today and after the steps; an unpriced line costs nothing in both.
 
     The lines are after's: today's, and those of the machine types and pools the steps add, with no machines today. A
-    line a step adds that a later step empties has no machines today or after, so it is left out.
+    line a step adds that a later step empties has no machines today or after, so it is left out; its machines at quiet
+    times are among those after.
     """
-    before, left = today.counts(), after.counts()
+    before, left, quiet = today.counts(), after.counts(), after.quiet_counts()
     results: List[LineResult] = []
     for pool in after.pools:
         for line in pool.lines:
             key = (pool.id, line.machine_type, line.capacity)
-            machines_today, machines_after = before.get(key, 0), left.get(key, 0)
+            machines_today, machines_after, machines_quiet = before.get(key, 0), left.get(key, 0), quiet.get(key, 0)
             if machines_today == machines_after == 0:
                 continue
             hourly = line.hourly
@@ -305,11 +321,28 @@ def line_results(today: ClusterState, after: ClusterState) -> Tuple[LineResult, 
                     note=line.note,
                     today=machines_today,
                     after=machines_after,
-                    cost_today=0 if hourly is None else line_cost(machines_today, hourly),
-                    cost_after=0 if hourly is None else line_cost(machines_after, hourly),
+                    quiet=machines_quiet,
+                    spot=line.spot,
+                    spot_note=line.spot_note,
+                    cost_today=0 if hourly is None else line_cost(machines_today, machines_today, hourly, None),
+                    cost_after=0 if hourly is None else line_cost(machines_after, machines_quiet, hourly, line.spot),
                 )
             )
     return tuple(results)
+
+
+def app_results(after: ClusterState) -> Tuple[AppResult, ...]:
+    """Give each app that runs fewer copies at quiet times, by namespace and name; none when no app does."""
+    if after.quiet is None:
+        return ()
+    copies = Counter(pod.workload for pod in after.pods)
+    quiet = Counter(pod.workload for pod in after.quiet.pods)
+    apps = [
+        AppResult(app.kind, app.namespace, app.name, number, quiet[app])
+        for app, number in copies.items()
+        if quiet[app] < number
+    ]
+    return tuple(sorted(apps, key=lambda app: (app.namespace, app.name, app.kind)))
 
 
 def assess(reading: Reading, prices: Mapping[PriceKey, Price], planned: Planned) -> ClusterResult:
@@ -318,7 +351,14 @@ def assess(reading: Reading, prices: Mapping[PriceKey, Price], planned: Planned)
     today = priced(reading.cluster, reading.collected.state, prices)
     cheaper = CheaperTypes({} if isinstance(planned, str) else searches(reading.cluster, planned, prices))
     pipeline = Pipeline(
-        [SmallerPods(snapshot.usage.peaks, snapshot.limit_ranges), SpareMachines(), cheaper, PackAcrossPools()]
+        [
+            SmallerPods(snapshot.usage.peaks, snapshot.limit_ranges),
+            SpareMachines(),
+            cheaper,
+            PackAcrossPools(),
+            FewerCopies(snapshot.scaling),
+            Spot(spot_prices(reading.cluster, prices)),
+        ]
     )
     after, steps = pipeline.run(today)
     shared = sum(step.saving for step in steps if step.row == SHARED_ROW)
@@ -327,8 +367,10 @@ def assess(reading: Reading, prices: Mapping[PriceKey, Price], planned: Planned)
         lines=line_results(today, after),
         steps=steps,
         workloads=workload_results(today, after, shared),
+        apps=app_results(after),
         bare_pods=sum(1 for pod in today.pods if pod.stays == NO_CONTROLLER),
         not_machines=reading.collected.not_machines,
         usage=snapshot.usage.reason,
         cheaper_types=planned if isinstance(planned, str) else None,
+        fewer_copies=snapshot.scaling.reason,
     )

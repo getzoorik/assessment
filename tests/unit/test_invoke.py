@@ -19,7 +19,7 @@ from tests.replay.clusters import (
     invoke_call,
     invoke_logs,
     invoke_text,
-    kept,
+    kept_snapshot,
     large_cluster,
     pod,
     top,
@@ -29,10 +29,18 @@ from tests.unit.clis import CloudTestCase, WatchingRunner
 from zoorik.cloud.azure import AzureCli
 from zoorik.cloud.started import StartedCommands
 from zoorik.errors import ClusterUnreadable, UnexpectedResponse
-from zoorik.kubectl.api import Snapshot, snapshot
+from zoorik.kubectl.api import Snapshot
 from zoorik.kubectl.direct import DOCS, DirectKubeApi, Kubeconfig
-from zoorik.kubectl.invoke import INVOKE_NAMESPACE, INVOKE_READ_SECONDS, TOO_LARGE, InvokeKubeApi, script, sections_of
-from zoorik.kubectl.objects import KINDS
+from zoorik.kubectl.invoke import (
+    INVOKE_NAMESPACE,
+    INVOKE_READ_SECONDS,
+    LISTED,
+    TOO_LARGE,
+    InvokeKubeApi,
+    script,
+    sections_of,
+)
+from zoorik.kubectl.objects import BUDGETS, SCALING_KINDS
 from zoorik.kubectl.usage import DEFAULT_SAMPLE_MINUTES, SampleWindow, Usage, peaks, top_table, usage_of
 
 # Azure gives back at most 512 KB of a command invoke's logs.
@@ -42,7 +50,8 @@ DEFAULT_WINDOW = SampleWindow(DEFAULT_SAMPLE_MINUTES)
 SHORT_WINDOW = SampleWindow(1)
 UNAVAILABLE = "Error from server (ServiceUnavailable): the server is currently unable to handle the request"
 UNAVAILABLE_REASON = "from server (ServiceUnavailable): the server is currently unable to handle the request"
-FORBIDDEN_REASON = f"cannot list nodes: access denied (it needs cluster-wide read access; {DOCS})"
+ACCESS_DENIED = f"access denied (it needs cluster-wide read access; {DOCS})"
+FORBIDDEN_REASON = f"cannot list nodes: {ACCESS_DENIED}"
 NO_METRICS = Usage({}, "metrics-server is not installed")
 
 
@@ -60,8 +69,9 @@ def without_section(text: str, name: str) -> str:
 
 def expected(cluster: Cluster) -> Snapshot:
     """Give the snapshot of cluster that both read methods should give."""
-    items = {kind.name: kept(kind, cluster.objects[kind.name]) for kind in KINDS}
-    return snapshot(items, usage_of([top_table(sample) for sample in cluster.samples if isinstance(sample, str)], None))
+    return kept_snapshot(
+        cluster, usage_of([top_table(sample) for sample in cluster.samples if isinstance(sample, str)], None)
+    )
 
 
 class InvokeTestCase(CloudTestCase):
@@ -127,6 +137,16 @@ class InvokeReadTest(InvokeTestCase):
         """A kind the identity may not list names the access it needs."""
         logs = invoke_logs(invoke_text(SMALL, {"nodes": FORBIDDEN.replace("\n", " ")}))
         self.assertEqual(self.unreadable(logs), FORBIDDEN_REASON)
+
+    def test_an_autoscaler_or_budget_list_that_fails_leaves_the_cluster_read(self) -> None:
+        """A section of either kind step 5 needs that is an error gives its reason, and the cluster is read."""
+        for kind in SCALING_KINDS:
+            with self.subTest(kind=kind.name):
+                read = self.invoke(invoke_logs(invoke_text(SMALL, {kind.name: FORBIDDEN.replace("\n", " ")})))
+                self.assertEqual(read.scaling.reason, f"cannot list {kind.resource}: {ACCESS_DENIED}")
+                self.assertEqual(len(read.pods), 8)
+                web = {item.name: item.labels for item in read.pods}["web-6d4b75cb6d-abcde"]
+                self.assertEqual("tier" in web, kind is not BUDGETS)
 
     def test_missing_metrics_give_no_usage_named(self) -> None:
         """When no sample answered, the kinds are read and the usage says why."""
@@ -218,18 +238,30 @@ class ScriptTest(InvokeTestCase):
         sample = "kubectl top pods -A --containers --no-headers --request-timeout=60s"
         self.assertEqual(
             calls,
-            [f"kubectl get {kind.resource} -A -o json --chunk-size=500 --request-timeout=60s" for kind in KINDS]
+            [f"kubectl get {kind.resource} -A -o json --chunk-size=500 --request-timeout=60s" for kind in LISTED]
             + [sample, "sleep 30", sample, "sleep 30", sample],
         )
+        self.assertEqual([kind.name for kind in LISTED[:2]], ["horizontalpodautoscalers", "poddisruptionbudgets"])
 
-    def test_a_label_no_placement_term_uses_is_dropped_the_same_way(self) -> None:
-        """The script's jq drops the labels the direct read drops, and keeps the same ones."""
+    def test_a_label_no_placement_term_or_budget_uses_is_dropped_the_same_way(self) -> None:
+        """The script's jq drops the labels the direct read drops, and keeps the same ones, a budget's key too."""
         self.run_in_folder(SMALL, SHORT_WINDOW)
         through_script = {item.name: item.labels for item in self.invoke(self.logs, SHORT_WINDOW).pods}
         direct = {item.name: item.labels for item in self.direct(SMALL, SHORT_WINDOW).pods}
         self.assertEqual(through_script, direct)
         self.assertEqual(
-            through_script["web-6d4b75cb6d-abcde"], {"app": "web", "pod-template-hash": "6d4b75cb6d", "version": "v2"}
+            through_script["web-6d4b75cb6d-abcde"],
+            {"app": "web", "pod-template-hash": "6d4b75cb6d", "version": "v2", "tier": "front"},
+        )
+
+    def test_a_budget_list_that_fails_through_the_script_narrows_without_it(self) -> None:
+        """Without the budgets, the script's jq narrows the labels as the direct read does, and keeps the reason."""
+        self.run_in_folder(SMALL, SHORT_WINDOW, {BUDGETS.name: FORBIDDEN})
+        read = self.invoke(self.logs, SHORT_WINDOW)
+        self.assertEqual(read.scaling.reason, f"cannot list {BUDGETS.resource}: {ACCESS_DENIED}")
+        self.assertEqual(
+            {item.name: item.labels for item in read.pods}["web-6d4b75cb6d-abcde"],
+            {"app": "web", "pod-template-hash": "6d4b75cb6d", "version": "v2"},
         )
 
     def test_the_script_prints_one_peak_table_for_any_window(self) -> None:

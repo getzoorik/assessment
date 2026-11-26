@@ -33,6 +33,7 @@ class SpareMachines:
 
     name = "Spare machines"
     row = SHARED_ROW
+    assumption = ""
 
     def apply(self, state: ClusterState) -> ClusterState:
         """Pack each priced pool in turn, by pool id."""

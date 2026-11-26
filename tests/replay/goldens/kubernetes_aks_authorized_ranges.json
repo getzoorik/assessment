@@ -6,6 +6,7 @@
   "after": 292,
   "clusters": [
    {
+    "apps": [],
     "bare_pods": 2,
     "cheaper_types": "the allocatable memory of its Standard_D4s_v5 nodes doesn't follow the platform's reservation",
     "cluster": {
@@ -14,6 +15,7 @@
      "name": "cluster-ranges",
      "region": "westeurope"
     },
+    "fewer_copies": null,
     "lines": [
      {
       "after": 2,
@@ -25,6 +27,9 @@
       "machine_type": "Standard_D4s_v5",
       "note": "",
       "pool": "system",
+      "quiet": 2,
+      "spot": null,
+      "spot_note": "",
       "today": 2
      }
     ],
@@ -32,27 +37,45 @@
     "steps": [
      {
       "after": 292,
+      "assumption": "",
       "before": 292,
       "name": "Smaller pods",
       "row": "smaller pods and spare machines (packing included)"
      },
      {
       "after": 292,
+      "assumption": "",
       "before": 292,
       "name": "Spare machines",
       "row": "smaller pods and spare machines (packing included)"
      },
      {
       "after": 292,
+      "assumption": "",
       "before": 292,
       "name": "Cheaper machine types",
       "row": "cheaper machine types"
      },
      {
       "after": 292,
+      "assumption": "",
       "before": 292,
       "name": "Packing across pools",
       "row": "smaller pods and spare machines (packing included)"
+     },
+     {
+      "after": 292,
+      "assumption": "each app with 3 or more copies and no autoscaler of its own runs at 2 copies (or its disruption budget's floor) for 12 hours a day",
+      "before": 292,
+      "name": "Fewer copies at quiet times",
+      "row": "fewer copies at quiet times"
+     },
+     {
+      "after": 292,
+      "assumption": "the machines running at quiet times, 12 h a day, on spot",
+      "before": 292,
+      "name": "Spot",
+      "row": "spot"
      }
     ],
     "usage": null,

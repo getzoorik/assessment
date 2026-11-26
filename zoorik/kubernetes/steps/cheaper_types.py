@@ -328,6 +328,7 @@ class CheaperTypes:
 
     name = "Cheaper machine types"
     row = ROW
+    assumption = ""
 
     def __init__(self, searches: Mapping[str, Search]) -> None:
         """Search each pool searches names, by pool id."""
@@ -465,7 +466,7 @@ class PoolSearch:
 
     def cost(self, counts: Counts) -> int:
         """Give what machines counted by pool and type cost a month, each pool's type a line."""
-        return sum(line_cost(number, self._prices[kind]) for (_, kind), number in counts.items())
+        return sum(line_cost(number, number, self._prices[kind], None) for (_, kind), number in counts.items())
 
     # -------------------------------------------------------- both searches
 

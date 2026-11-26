@@ -61,11 +61,11 @@ class FoldedKeys:
 
 
 @dataclass(frozen=True)
-class PlacementLabels:
-    """A pod's labels: kept whole in a page, then narrowed across pods to the keys a required placement term uses."""
+class PodLabels:
+    """A pod's labels: kept whole in a page, then narrowed to the keys a placement term or a disruption budget uses."""
 
 
-Rule = Union[Whole, Fields, Each, FoldedKeys, PlacementLabels]
+Rule = Union[Whole, Fields, Each, FoldedKeys, PodLabels]
 WHOLE = Whole()
 
 
@@ -158,7 +158,7 @@ NODE = Fields(
 )
 POD = Fields(
     {
-        "metadata": Fields({"name": WHOLE, "namespace": WHOLE, "ownerReferences": OWNERS, "labels": PlacementLabels()}),
+        "metadata": Fields({"name": WHOLE, "namespace": WHOLE, "ownerReferences": OWNERS, "labels": PodLabels()}),
         "spec": Fields(
             {
                 "nodeName": WHOLE,
@@ -222,6 +222,13 @@ LIMIT_RANGE = Fields(
         ),
     }
 )
+AUTOSCALER = Fields(
+    {
+        "metadata": Fields({"namespace": WHOLE}),
+        "spec": Fields({"scaleTargetRef": Fields({"kind": WHOLE, "name": WHOLE})}),
+    }
+)
+BUDGET = Fields({"metadata": Fields({"namespace": WHOLE}), "spec": Fields({"selector": WHOLE, "minAvailable": WHOLE})})
 
 
 NODES = Kind("nodes", "nodes", "/api/v1/nodes", "Node", NODE)
@@ -247,6 +254,22 @@ VOLUMES = Kind("persistentvolumes", "persistentvolumes", "/api/v1/persistentvolu
 CSI_NODES = Kind("csinodes", "csinodes.storage.k8s.io", "/apis/storage.k8s.io/v1/csinodes", "CSINode", CSI_NODE)
 LIMIT_RANGES = Kind("limitranges", "limitranges", "/api/v1/limitranges", "LimitRange", LIMIT_RANGE)
 KINDS = (NODES, PODS, REPLICASETS, JOBS, CLAIMS, VOLUMES, CSI_NODES, LIMIT_RANGES)
+AUTOSCALERS = Kind(
+    "horizontalpodautoscalers",
+    "horizontalpodautoscalers.autoscaling",
+    "/apis/autoscaling/v2/horizontalpodautoscalers",
+    "HorizontalPodAutoscaler",
+    AUTOSCALER,
+)
+BUDGETS = Kind(
+    "poddisruptionbudgets",
+    "poddisruptionbudgets.policy",
+    "/apis/policy/v1/poddisruptionbudgets",
+    "PodDisruptionBudget",
+    BUDGET,
+)
+# Only the copies at quiet times need these two, so a cluster where one can't be read is still read without them.
+SCALING_KINDS = (AUTOSCALERS, BUDGETS)
 
 
 # ---------------------------------------------------------------- keeping the allowed fields
@@ -254,7 +277,7 @@ KINDS = (NODES, PODS, REPLICASETS, JOBS, CLAIMS, VOLUMES, CSI_NODES, LIMIT_RANGE
 
 def slim(value: Json, rule: Rule, path: str) -> Json:
     """Keep only the parts of value that rule allows; a value of another shape than rule expects is unexpected."""
-    if isinstance(rule, (Whole, PlacementLabels)):
+    if isinstance(rule, (Whole, PodLabels)):
         return value
     if isinstance(rule, Each):
         items = enumerate(_items(value, path))
@@ -322,13 +345,15 @@ JQ_HELPERS = (
     "def e(w; f): w as $w | map(select(.[$w]) | f); "
     "def sk: ((.matchLabels // {}) | keys) + [(.matchExpressions // [])[] | .key];"
 )
-# The label keys a required placement term of any pod in $p uses, plus the add-on manager's mode, as a set.
-PLACEMENT_KEYS_JQ = (
+# The label keys a required placement term of any pod in $p uses, the keys of each disruption budget's selector in $b,
+# and the add-on manager's mode, as a set.
+LABEL_KEYS_JQ = (
     "[$p[] | .spec | ((.topologySpreadConstraints // [])[] "
     f'| select(.whenUnsatisfiable == "{DO_NOT_SCHEDULE}") '
     "| (((.labelSelector // {}) | sk) + (.matchLabelKeys // []))[]), "
     f"(((.affinity.podAffinity.{REQUIRED} // []) + (.affinity.podAntiAffinity.{REQUIRED} // []))[] "
     "| (((.labelSelector // {}) | sk) + (.matchLabelKeys // []) + (.mismatchLabelKeys // []))[])] "
+    "+ [$b[][] | (.spec.selector // empty) | sk[]] "
     f'+ ["{ADDON_MODE}"] | map({{(.): true}}) | add'
 )
 NARROW_LABELS_JQ = "if .metadata.labels != null then .metadata.labels |= with_entries(select($keep[.key])) else . end"
@@ -336,7 +361,7 @@ NARROW_LABELS_JQ = "if .metadata.labels != null then .metadata.labels |= with_en
 
 def jq(rule: Rule) -> str:
     """Write rule as a jq filter that keeps what slim keeps."""
-    if isinstance(rule, (Whole, PlacementLabels)):
+    if isinstance(rule, (Whole, PodLabels)):
         return "."
     if isinstance(rule, Each):
         return f"map({jq(rule.item)})" if rule.where is None else f'e("{rule.where}"; {jq(rule.item)})'
@@ -351,13 +376,14 @@ def jq(rule: Rule) -> str:
 def jq_filter(kind: Kind) -> str:
     """Write the jq program that turns kubectl get's answer for kind into what slim_page keeps, pod labels narrowed.
 
-    The pods' labels are narrowed inside the cluster, as with_placement_labels narrows them, so the answer stays small.
+    The pods' labels are narrowed inside the cluster, as with_kept_labels narrows them, so the answer stays small. The
+    program for pods reads the disruption budgets' answer as $b, which holds nothing when they couldn't be read.
     """
     test = "" if kind.test is None else f" | select({kind.test.jq()})"
     items = f"[.items[] | {jq(kind.item)}{test}]"
     if kind is not PODS:
         return f"{JQ_HELPERS} {items}"
-    return f"{JQ_HELPERS} {items} as $p | ({PLACEMENT_KEYS_JQ}) as $keep | [$p[] | {NARROW_LABELS_JQ}]"
+    return f"{JQ_HELPERS} {items} as $p | ({LABEL_KEYS_JQ}) as $keep | [$p[] | {NARROW_LABELS_JQ}]"
 
 
 # ---------------------------------------------------------------- the typed objects, read from what was kept
@@ -495,7 +521,7 @@ class Pod:
     controller: Optional[OwnerRef]
     # None for a pod not placed yet.
     node: Optional[str]
-    # Only the labels whose keys a required placement term uses, and the add-on manager's mode.
+    # Only the labels whose keys a required placement term or a disruption budget uses, and the add-on manager's mode.
     labels: Mapping[str, str]
     overhead: Mapping[str, int]
     # The pod-level resources; None when the pod sets none.
@@ -578,6 +604,26 @@ class LimitRange:
 
     namespace: str
     limits: Tuple[LimitItem, ...]
+
+
+@dataclass(frozen=True)
+class Autoscaler:
+    """A HorizontalPodAutoscaler: its namespace, and the kind and name of the object it scales."""
+
+    namespace: str
+    kind: str
+    name: str
+
+
+@dataclass(frozen=True)
+class DisruptionBudget:
+    """A PodDisruptionBudget: the pods it selects, and the copies it keeps available when that is a whole number."""
+
+    namespace: str
+    # None selects no pods; an empty selector selects every pod in the namespace.
+    selector: Optional[LabelSelector]
+    # None for a percentage, and for a budget that sets maxUnavailable instead.
+    min_available: Optional[int]
 
 
 # The API leaves an empty map or list out of an object, so one that is missing is empty.
@@ -809,7 +855,24 @@ def read_limit_range(record: Record) -> LimitRange:
     )
 
 
-# ---------------------------------------------------------------- the pod labels placement uses
+def read_autoscaler(record: Record) -> Autoscaler:
+    """Read one HorizontalPodAutoscaler."""
+    target = record.record("spec").record("scaleTargetRef")
+    return Autoscaler(record.record("metadata").text("namespace"), target.text("kind"), target.text("name"))
+
+
+def read_budget(record: Record) -> DisruptionBudget:
+    """Read one PodDisruptionBudget; its minAvailable is a whole number or a percentage."""
+    metadata, spec = record.record("metadata"), record.optional_record("spec")
+    floor = None if spec is None else spec.optional_whole_or_text("minAvailable")
+    return DisruptionBudget(
+        metadata.text("namespace"),
+        None if spec is None else _selector(spec.optional_record("selector")),
+        floor if isinstance(floor, int) else None,
+    )
+
+
+# ---------------------------------------------------------------- the pod labels the run reads
 
 
 def selector_keys(selector: Optional[LabelSelector]) -> Set[str]:
@@ -819,13 +882,13 @@ def selector_keys(selector: Optional[LabelSelector]) -> Set[str]:
     return {*selector.match_labels, *(requirement.key for requirement in selector.match_expressions)}
 
 
-def placement_label_keys(pods: Sequence[Pod]) -> FrozenSet[str]:
-    """Name the label keys a required placement term of any pod uses, plus the add-on manager's mode.
+def label_keys(pods: Sequence[Pod], budgets: Sequence[DisruptionBudget]) -> FrozenSet[str]:
+    """Name the label keys a required placement term of any pod or a disruption budget uses, and the add-on mode.
 
     Those are the keys of the label selectors and matchLabelKeys of DoNotSchedule spread constraints, and of required
-    pod affinity and anti-affinity terms, with their mismatchLabelKeys.
+    pod affinity and anti-affinity terms, with their mismatchLabelKeys, and the keys of each budget's selector.
     """
-    keys: Set[str] = {ADDON_MODE}
+    keys: Set[str] = {ADDON_MODE, *(key for budget in budgets for key in selector_keys(budget.selector))}
     for pod in pods:
         for constraint in pod.spread:
             if constraint.when_unsatisfiable == DO_NOT_SCHEDULE:
@@ -835,7 +898,7 @@ def placement_label_keys(pods: Sequence[Pod]) -> FrozenSet[str]:
     return frozenset(keys)
 
 
-def with_placement_labels(pods: Sequence[Pod]) -> Tuple[Pod, ...]:
-    """Keep of each pod's labels only those whose keys placement_label_keys names for these pods."""
-    keys = placement_label_keys(pods)
+def with_kept_labels(pods: Sequence[Pod], budgets: Sequence[DisruptionBudget]) -> Tuple[Pod, ...]:
+    """Keep of each pod's labels only those whose keys label_keys names for these pods and budgets."""
+    keys = label_keys(pods, budgets)
     return tuple(replace(pod, labels={key: value for key, value in pod.labels.items() if key in keys}) for pod in pods)

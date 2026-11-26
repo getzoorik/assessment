@@ -6,12 +6,13 @@ from typing import Dict, List, Sequence
 from zoorik.cloud.fields import Record
 from zoorik.kubectl.objects import (
     KINDS,
-    PODS,
+    SCALING_KINDS,
     WHOLE,
     Fields,
     Json,
     Kind,
-    placement_label_keys,
+    label_keys,
+    read_budget,
     read_pod,
     slim,
     slim_page,
@@ -19,7 +20,7 @@ from zoorik.kubectl.objects import (
 
 # Of the version check, a recording keeps only the version.
 VERSION = Fields({"gitVersion": WHOLE})
-LISTS: Dict[str, Kind] = {kind.list_kind: kind for kind in KINDS}
+LISTS: Dict[str, Kind] = {kind.list_kind: kind for kind in (*KINDS, *SCALING_KINDS)}
 
 
 class UnredactedOutput(Exception):
@@ -41,14 +42,20 @@ def page_document(kind: Kind, items: Sequence[Json], token: str = "") -> Dict[st
     return document
 
 
-def pod_page(text: str) -> bool:
-    """Tell whether recorded kubectl output is a page of pods."""
-    return text.startswith("{") and json.loads(text).get("kind") == PODS.list_kind
+def page_of(text: str, kind: Kind) -> bool:
+    """Tell whether recorded kubectl output is a page of kind's list."""
+    return text.startswith("{") and json.loads(text).get("kind") == kind.list_kind
 
 
-def narrow_pod_items(items: Sequence[Json]) -> List[Json]:
-    """Keep of each kept pod's labels only those whose keys a required placement term of one of these pods uses."""
-    keys = placement_label_keys([read_pod(Record(item, f"pods[{index}]")) for index, item in enumerate(items)])
+def narrow_pod_items(items: Sequence[Json], budgets: Sequence[Json]) -> List[Json]:
+    """Keep of each kept pod's labels only those whose keys a placement term of these pods or a budget's selector uses.
+
+    The budgets are the cluster's kept disruption budgets.
+    """
+    keys = label_keys(
+        [read_pod(Record(item, f"pods[{index}]")) for index, item in enumerate(items)],
+        [read_budget(Record(item, f"poddisruptionbudgets[{index}]")) for index, item in enumerate(budgets)],
+    )
     narrowed: List[Json] = []
     for item in items:
         labels = item["metadata"].get("labels")
@@ -81,10 +88,11 @@ class Redactor:
         """Give the part of a file a program wrote that may be recorded; the only such files are kubeconfigs."""
         return kubeconfig(text)
 
-    def narrow_pod_pages(self, pages: Sequence[str]) -> List[str]:
-        """Narrow one cluster's recorded pod pages, together, to the labels the readers keep."""
+    def narrow_pod_pages(self, pages: Sequence[str], budget_pages: Sequence[str]) -> List[str]:
+        """Narrow one cluster's recorded pod pages, together, to the labels the readers keep with its budget pages."""
         documents = [json.loads(page) for page in pages]
-        items = narrow_pod_items([item for document in documents for item in document["items"]])
+        budgets = [item for page in budget_pages for item in json.loads(page)["items"]]
+        items = narrow_pod_items([item for document in documents for item in document["items"]], budgets)
         narrowed: List[str] = []
         for document in documents:
             count = len(document["items"])

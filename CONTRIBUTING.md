@@ -116,12 +116,12 @@ The tests never reach a real cloud. Each run in `tests/replay/` answers every `a
 
 ## Add a step
 
-A saving step is a class with a `name`, the page-1 `row` its saving counts in, and `apply(state)`, which gives the cluster state the step leaves (the `Step` protocol in `zoorik/kubernetes/steps/__init__.py`).
+A saving step is a class with a `name`, the page-1 `row` its saving counts in, the `assumption` its figure rests on ("" for none), which the report states beside the figure, and `apply(state)`, which gives the cluster state the step leaves (the `Step` protocol in `zoorik/kubernetes/steps/__init__.py`).
 
 1. Write it in its own module under `zoorik/kubernetes/steps/`. Place pods only through `zoorik/kubernetes/placement.py` and `zoorik/kubernetes/packing.py`, so every step keeps the same placement rules.
 2. Add it to the pipeline in `zoorik/kubernetes/assessment.py`, in its place. Each step works on what the one before left, and the pipeline doesn't apply a step that would cost more, so no step is negative and the steps add up exactly.
 3. Test it with a figure worked out by hand, add a replay scenario, and update the goldens.
-4. Describe it under "How the estimate works" in the README.
+4. Describe it under "How the estimate works" in the README, and add it to the steps `zoorik assess --help` lists (`STEPS` in `zoorik/cli.py`).
 
 ## Add a cloud
 

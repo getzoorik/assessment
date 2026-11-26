@@ -15,7 +15,7 @@ from tests.replay.clusters import (
     Sample,
     TopFailure,
     direct_calls,
-    kept,
+    kept_snapshot,
     kubectl,
     list_calls,
     top,
@@ -27,7 +27,7 @@ from tests.replay.scenarios import call
 from tests.unit.clis import CloudTestCase, WatchingRunner
 from zoorik.cloud.cli import Host
 from zoorik.errors import ApiUnreachable, ClusterUnreadable, ToolNotInstalled, UnexpectedResponse
-from zoorik.kubectl.api import Snapshot, snapshot
+from zoorik.kubectl.api import Snapshot
 from zoorik.kubectl.direct import (
     DOCS,
     KUBECTL_REASONS,
@@ -37,7 +37,7 @@ from zoorik.kubectl.direct import (
     Kubeconfig,
     failure,
 )
-from zoorik.kubectl.objects import KINDS, NODES, PODS, REPLICASETS
+from zoorik.kubectl.objects import BUDGETS, KINDS, NODES, PODS, REPLICASETS, SCALING_KINDS
 from zoorik.kubectl.usage import SampleWindow, Usage, top_table, usage_of
 from zoorik.system.process import Completed
 
@@ -92,12 +92,14 @@ class DirectReadTest(CloudTestCase):
         return str(raised.exception)
 
     def test_every_kind_is_listed_in_pages_of_500(self) -> None:
-        """/version comes first, then each of the eight kinds page by page, then the samples."""
-        calls = direct_calls(SMALL, {kind.name: 1 for kind in KINDS})
+        """/version comes first, then each of the ten kinds page by page, then the samples."""
+        calls = direct_calls(SMALL, {kind.name: 1 for kind in (*KINDS, *SCALING_KINDS)})
         self.read(calls)
         self.assertEqual(self.keys(), [made.key for made in calls])
         lists = [made.argv[-1] for made in calls[1 : -len(SAMPLES)]]
-        self.assertEqual(sorted({path.split("?")[0] for path in lists}), sorted(kind.path for kind in KINDS))
+        self.assertEqual(
+            sorted({path.split("?")[0] for path in lists}), sorted(kind.path for kind in (*KINDS, *SCALING_KINDS))
+        )
         self.assertIn("/api/v1/pods?limit=500&continue=page3%3D", lists)
         self.assertEqual(
             [timeout for _, timeout, _ in self.runner.runs],
@@ -107,9 +109,8 @@ class DirectReadTest(CloudTestCase):
 
     def test_the_snapshot_holds_what_the_allowlist_keeps(self) -> None:
         """The snapshot holds every kind's kept items, read, and each container's peak over the samples."""
-        items = {kind.name: kept(kind, SMALL.objects[kind.name]) for kind in KINDS}
         usage = usage_of([top_table(sample) for sample in SAMPLES], None)
-        self.assertEqual(self.read(direct_calls(SMALL)), snapshot(items, usage))
+        self.assertEqual(self.read(direct_calls(SMALL)), kept_snapshot(SMALL, usage))
 
     def test_samples_start_30_seconds_apart_however_long_each_takes(self) -> None:
         """Each sample starts 30 s after the one before, counted from the first, even when each takes 5 s."""
@@ -175,6 +176,19 @@ class DirectReadTest(CloudTestCase):
         calls = [version_call(), *(page for pages in before for page in pages), jobs, *direct_calls(SMALL)[-3:]]
         self.assertEqual(self.unreadable(calls), f"cannot list jobs.batch: {UNAVAILABLE_REASON}")
         self.assertEqual(len(self.runner.runs), len(calls) - len(SAMPLES))
+
+    def test_an_autoscaler_or_budget_list_that_fails_leaves_the_cluster_read(self) -> None:
+        """A list of either kind step 5 needs that fails gives its reason, and the pods keep no budget's label keys."""
+        for kind in SCALING_KINDS:
+            with self.subTest(kind=kind.name):
+                path = f"{kind.path}?limit=500"
+                failed = call(kubectl("get", "--raw", path), exit_code=1, stderr=FORBIDDEN)
+                read = self.read([failed if made.argv[-1] == path else made for made in direct_calls(SMALL)])
+                reason = f"cannot list {kind.resource}: access denied (it needs cluster-wide read access; {DOCS})"
+                self.assertEqual(read.scaling.reason, reason)
+                self.assertEqual((len(read.pods), len(read.usage.peaks)), (8, 5))
+                web = {item.name: item.labels for item in read.pods}["web-6d4b75cb6d-abcde"]
+                self.assertEqual("tier" in web, kind is not BUDGETS)
 
     def test_a_page_that_fails_makes_the_cluster_unreadable(self) -> None:
         """A later page that fails stops the read as the first page would."""

@@ -12,7 +12,7 @@ from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 from zoorik.cloud.keys import AWS
 from zoorik.kubectl.objects import Node, OwnerRef, PersistentVolume
 from zoorik.kubectl.objects import Pod as ApiPod
-from zoorik.kubernetes.model import ClusterRead, ClusterState, Line, Machine, Pod, Pool, Workload
+from zoorik.kubernetes.model import ClusterRead, ClusterState, Line, LineKey, Machine, Pod, Pool, Workload
 from zoorik.kubernetes.placement import (
     ARCH_LABEL,
     OS_LABEL,
@@ -175,10 +175,6 @@ def line_note(membership: Membership, machine_type: Optional[str], oses: Sequenc
     if any(os != LINUX for os in oses):
         return "only Linux machines are priced"
     return ""
-
-
-# A line's key: its pool, machine type and capacity.
-LineKey = Tuple[str, Optional[str], Optional[Capacity]]
 
 
 def line_order(key: LineKey) -> Tuple[str, str, str]:

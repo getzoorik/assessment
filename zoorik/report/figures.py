@@ -37,6 +37,11 @@ def pill(saving: int, today: int) -> str:
     return f"{less(saving)} a month{DOT}{percent(saving, today)}%" if saving > 0 else "$0 a month"
 
 
+def assumption(text: str) -> str:
+    """Write the assumption a figure rests on as the line under it; "" for a figure that rests on none."""
+    return f"Assumption: {text}" if text else ""
+
+
 def saving_cell(dollars: int) -> Cell:
     """Give a saving's cell: bold and green when there is one, else $0."""
     return Cell(less(dollars), bold=True, color=GREEN_INK) if dollars > 0 else Cell("$0")

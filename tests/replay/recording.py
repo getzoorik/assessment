@@ -9,8 +9,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
-from tests.replay.redact import Redactor, pod_page
+from tests.replay.redact import Redactor, page_of
 from zoorik.errors import AssessmentError
+from zoorik.kubectl.objects import BUDGETS, PODS
 from zoorik.system.clock import Clock
 from zoorik.system.env import EnvFacts
 from zoorik.system.http import HttpClient
@@ -123,6 +124,11 @@ def read_text(path: str) -> Optional[str]:
         return text.read()
 
 
+def cluster_of(call: Call) -> str:
+    """Name the cluster a kubectl call reads: its kubeconfig."""
+    return call.argv[call.argv.index("--kubeconfig") + 1]
+
+
 class Recorder:
     """Records a real run: its Runtime runs, fetches and asks for real, and each answer is kept, redacted."""
 
@@ -172,17 +178,22 @@ class Recorder:
     def finished(self) -> Recording:
         """Give the recording with each cluster's pod pages narrowed together to the labels the readers keep.
 
-        One page can't tell which labels a placement term of a pod on another page uses, so this waits for the end
-        of the run. The cluster of a page is its kubeconfig.
+        One page can't tell which labels a placement term of a pod on another page, or a disruption budget, uses, so
+        this waits for the end of the run. The cluster of a page is its kubeconfig.
         """
         pages: Dict[str, List[Tuple[int, Completed]]] = {}
+        budgets: Dict[str, List[str]] = {}
         for index, call in enumerate(self.recording.calls):
-            if call.argv[0] == "kubectl" and isinstance(call.outcome, Completed) and pod_page(call.outcome.stdout):
-                cluster = call.argv[call.argv.index("--kubeconfig") + 1]
-                pages.setdefault(cluster, []).append((index, call.outcome))
+            if call.argv[0] != "kubectl" or not isinstance(call.outcome, Completed):
+                continue
+            if page_of(call.outcome.stdout, PODS):
+                pages.setdefault(cluster_of(call), []).append((index, call.outcome))
+            elif page_of(call.outcome.stdout, BUDGETS):
+                budgets.setdefault(cluster_of(call), []).append(call.outcome.stdout)
         calls = list(self.recording.calls)
-        for found in pages.values():
-            narrowed = self._redactor.narrow_pod_pages([completed.stdout for _, completed in found])
+        for cluster, found in pages.items():
+            pod_pages = [completed.stdout for _, completed in found]
+            narrowed = self._redactor.narrow_pod_pages(pod_pages, budgets.get(cluster, []))
             for (index, completed), text in zip(found, narrowed):
                 calls[index] = dataclasses.replace(calls[index], outcome=dataclasses.replace(completed, stdout=text))
         return dataclasses.replace(self.recording, calls=calls)

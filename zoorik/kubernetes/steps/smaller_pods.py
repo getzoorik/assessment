@@ -154,6 +154,7 @@ class SmallerPods:
 
     name = "Smaller pods"
     row = SHARED_ROW
+    assumption = ""
 
     def __init__(self, peaks: Mapping[ContainerKey, Peak], limit_ranges: Sequence[LimitRange]) -> None:
         """Size from peaks, within limit_ranges."""

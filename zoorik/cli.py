@@ -57,13 +57,17 @@ DESCRIPTION = (
     f"AWS account the az and aws CLIs are signed in to, and writes one PDF report for you to email to {CONTACT}."
 )
 ASSESS = "read every signed-in Azure and AWS account and write the report"
-# The Kubernetes steps, one line each, below the options of assess --help.
+# The Kubernetes steps, with the assumptions of the last two, below the options of assess --help.
 STEPS = (
     "The Kubernetes saving, step by step, each step on what the one before left:\n"
     "  1. smaller pods: each container's request becomes its peak use x 1.3\n"
     "  2. spare machines: each pool's pods on as few of its machines as hold them\n"
     "  3. cheaper machine types: the cheapest type, or mix of two, for each pool\n"
-    "  4. packing across pools: each pod may move to any pool where it can run"
+    "  4. packing across pools: each pod may move to any pool where it can run\n"
+    "  5. fewer copies at quiet times: each app with 3 or more copies and no\n"
+    "     autoscaler of its own runs at 2 copies (or its disruption budget's\n"
+    "     floor) for 12 hours a day\n"
+    "  6. spot: the machines running at quiet times, 12 h a day, on spot"
 )
 # argparse's own width on an 80-column terminal, which the description is wrapped to by hand beside the steps.
 HELP_WIDTH = 78

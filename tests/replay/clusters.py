@@ -10,16 +10,16 @@ import gzip
 import hashlib
 import json
 from dataclasses import dataclass
-from typing import Dict, List, Mapping, Optional, Sequence, Union
+from typing import Collection, Dict, List, Mapping, Optional, Sequence, Union
 
 from tests.replay.recording import Call
 from tests.replay.redact import narrow_pod_items
 from tests.replay.scenarios import call
 from zoorik.cloud.azure import AZURE, AccessProfile, AksCluster
-from zoorik.kubectl.api import PAGE_SIZE
+from zoorik.kubectl.api import PAGE_SIZE, Snapshot, snapshot
 from zoorik.kubectl.invoke import script
-from zoorik.kubectl.objects import KINDS, PODS, Json, Kind, slim
-from zoorik.kubectl.usage import DEFAULT_SAMPLE_MINUTES, MEBIBYTE, SampleWindow, peaks, top_table
+from zoorik.kubectl.objects import BUDGETS, KINDS, PODS, SCALING_KINDS, Json, Kind, slim
+from zoorik.kubectl.usage import DEFAULT_SAMPLE_MINUTES, MEBIBYTE, SampleWindow, Usage, peaks, top_table
 
 KUBECONFIG = "<temp>/kube/one.yaml"
 TOP = ("top", "pods", "-A", "--containers", "--no-headers")
@@ -176,6 +176,36 @@ def csi_node(name: str, drivers: List[Json]) -> Json:
 def limit_range(namespace: str, limits: List[Json]) -> Json:
     """Make a LimitRange."""
     return {"metadata": {"name": "limits", "namespace": namespace}, "spec": {"limits": limits}}
+
+
+def autoscaler(namespace: str, name: str, kind: str = "Deployment") -> Json:
+    """Make a HorizontalPodAutoscaler of the object of kind and name, with the fields the run never reads."""
+    target = {"apiVersion": "argoproj.io/v1alpha1" if kind == "Rollout" else "apps/v1", "kind": kind, "name": name}
+    metric = {
+        "type": "Resource",
+        "resource": {"name": "cpu", "target": {"type": "Utilization", "averageUtilization": 70}},
+    }
+    return {
+        "metadata": {
+            "name": name,
+            "namespace": namespace,
+            "uid": f"uid-hpa-{name}",
+            "annotations": {"note": "private-note"},
+        },
+        "spec": {"scaleTargetRef": target, "minReplicas": 2, "maxReplicas": 10, "metrics": [metric]},
+        "status": {"currentReplicas": 2, "desiredReplicas": 2},
+    }
+
+
+def budget(namespace: str, name: str, selector: Optional[Json], **spec: Json) -> Json:
+    """Make a PodDisruptionBudget whose spec is selector and spec, such as minAvailable, with its status."""
+    full = dict(spec) if selector is None else {"selector": selector, **spec}
+    status = {"currentHealthy": 2, "desiredHealthy": 1, "disruptionsAllowed": 1, "expectedPods": 2}
+    return {
+        "metadata": {"name": name, "namespace": namespace, "uid": f"uid-pdb-{name}"},
+        "spec": full,
+        "status": status,
+    }
 
 
 SPREAD = {
@@ -399,6 +429,11 @@ def small_objects() -> Dict[str, List[Json]]:
                 ],
             )
         ],
+        "horizontalpodautoscalers": [autoscaler("shop", "web")],
+        "poddisruptionbudgets": [
+            budget("shop", "web", {"matchLabels": {"tier": "front"}}, minAvailable=1),
+            budget("shop", "db", {"matchLabels": {"role": "db"}}, maxUnavailable=1),
+        ],
     }
 
 
@@ -492,7 +527,7 @@ def direct_calls(
     sizes = per_page or {}
     lists = [
         list_calls(kind, cluster.objects[kind.name], sizes.get(kind.name, PAGE_SIZE), kubeconfig=kubeconfig)
-        for kind in KINDS
+        for kind in (*KINDS, *SCALING_KINDS)
     ]
     return [
         version_call(kubeconfig),
@@ -504,11 +539,24 @@ def direct_calls(
 # ---------------------------------------------------------------- the command-invoke read's answer
 
 
-def kept(kind: Kind, items: Sequence[Json]) -> List[Json]:
-    """Give what kind's jq filter keeps of its items, worked out in Python."""
+def kept(kind: Kind, items: Sequence[Json], budgets: Sequence[Json]) -> List[Json]:
+    """Give what kind's jq filter keeps of its items, worked out in Python; pods with the cluster's kept budgets."""
     slimmed = [slim(item, kind.item, f"{kind.resource}[{index}]") for index, item in enumerate(items)]
     passing = [item for item in slimmed if kind.test is None or kind.test.passes(item)]
-    return narrow_pod_items(passing) if kind is PODS else passing
+    return narrow_pod_items(passing, budgets) if kind is PODS else passing
+
+
+def kept_budgets(cluster: Cluster, failed: Collection[str] = ()) -> List[Json]:
+    """Give the cluster's budgets as the pods' labels are narrowed with them: none when their list failed."""
+    return [] if BUDGETS.name in failed else kept(BUDGETS, cluster.objects[BUDGETS.name], [])
+
+
+def kept_snapshot(cluster: Cluster, usage: Usage) -> Snapshot:
+    """Give the snapshot both read methods make of cluster's kept items, with usage."""
+    budgets = kept_budgets(cluster)
+    items = {kind.name: kept(kind, cluster.objects[kind.name], budgets) for kind in KINDS}
+    scaling = {kind.name: kept(kind, cluster.objects[kind.name], budgets) for kind in SCALING_KINDS}
+    return snapshot(items, scaling, usage)
 
 
 def peak_table(samples: Sequence[Sample]) -> str:
@@ -527,9 +575,10 @@ def peak_table(samples: Sequence[Sample]) -> str:
 def invoke_text(cluster: Cluster, failures: Optional[Mapping[str, str]] = None) -> str:
     """Give the sections the script prints before gzip: each kind's kept items, or ! and its error, then the usage."""
     failed = failures or {}
+    budgets = kept_budgets(cluster, failed)
     lines: List[str] = []
-    for kind in KINDS:
-        items = json.dumps(kept(kind, cluster.objects[kind.name]), separators=(",", ":"))
+    for kind in (*SCALING_KINDS, *KINDS):
+        items = json.dumps(kept(kind, cluster.objects[kind.name], budgets), separators=(",", ":"))
         lines += [f"@@{kind.name}", "!" + failed[kind.name] if kind.name in failed else items]
     return "\n".join([*lines, "@@usage", peak_table(cluster.samples)]) + "\n"
 
@@ -725,5 +774,9 @@ def large_cluster() -> Cluster:
         ],
         "csinodes": [csi_node(name, drivers) for name in names],
         "limitranges": [limit_range(f"team-{index:02d}", container_max) for index in range(TEAMS)],
+        "horizontalpodautoscalers": [autoscaler(namespace, app) for namespace, app in deployments[::2]],
+        "poddisruptionbudgets": [
+            budget(namespace, app, {"matchLabels": {"app": app}}, minAvailable=2) for namespace, app, _ in apps
+        ],
     }
     return Cluster(objects, [top_rows(pods, sample) for sample in range(SampleWindow(DEFAULT_SAMPLE_MINUTES).samples)])

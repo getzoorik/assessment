@@ -10,7 +10,7 @@ from zoorik.kubectl.objects import (
     LabelSelector,
     PersistentVolume,
     SpreadConstraint,
-    with_placement_labels,
+    with_kept_labels,
 )
 from zoorik.kubectl.usage import MEBIBYTE
 from zoorik.kubernetes.collect import LOCAL_VOLUME, NAMESPACES_BY_LABEL, NO_CONTROLLER
@@ -199,7 +199,7 @@ class SpreadAndAffinityTest(unittest.TestCase):
         ]
         pods.append(placed(api_pod("app-1", 300, labels={"app": "app", "tier": "front"}), "m4"))
         machines = [machine(f"m{n}") for n in range(1, 5)]
-        narrowed = with_placement_labels([pod.source for pod in pods])
+        narrowed = with_kept_labels([pod.source for pod in pods], ())
         dropped = [replace(pod, source=source) for pod, source in zip(pods, narrowed)]
         self.assertEqual(narrowed[0].labels, {"app": "web"})
         full = SpareMachines().apply(state([pool()], machines, pods))
@@ -243,6 +243,7 @@ class StepThatAddsMachines:
 
     name = "Adds a machine"
     row = "test"
+    assumption = ""
 
     def apply(self, before: ClusterState) -> ClusterState:
         """Add one more machine like the first."""
@@ -257,7 +258,7 @@ class PipelineTest(unittest.TestCase):
         """A step whose state costs more than the one before it leaves the state as it was, and saves $0."""
         today = worked_figure()
         after, steps = Pipeline([StepThatAddsMachines()]).run(today)
-        self.assertEqual((after, steps), (today, (StepResult("Adds a machine", "test", 730, 730),)))
+        self.assertEqual((after, steps), (today, (StepResult("Adds a machine", "test", "", 730, 730),)))
 
     def test_a_workload_whose_raise_a_machine_has_no_room_for_is_packed_at_todays_requests(self) -> None:
         """Every pod peaks at 3000m, so would ask 3900m: three on m1 ask 11,700m of its 4000m, so all keep 100m.

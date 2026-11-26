@@ -58,13 +58,17 @@ Every AKS cluster in the subscriptions it reads, and every EKS cluster in the re
   - a cluster in any other state, or whose node groups can't be read, is named as not assessed;
   - a cluster whose API server doesn't answer is named as not assessed. When its endpoint is private only, the reason says to run the assessment from inside its VPC.
 
-In each cluster it lists, 500 at a time: nodes, pods, ReplicaSets, Jobs, PersistentVolumeClaims, PersistentVolumes, CSINodes and LimitRanges. It keeps only these fields:
+In each cluster it lists, 500 at a time: nodes, pods, ReplicaSets, Jobs, PersistentVolumeClaims, PersistentVolumes, CSINodes, LimitRanges, HorizontalPodAutoscalers and PodDisruptionBudgets. It keeps only these fields:
 - **nodes:** name, labels, provider id, taints, capacity, allocatable and kubelet version;
-- **pods:** name, namespace, controller, phase, node, overhead, node selector, required node affinity, required pod affinity and anti-affinity, tolerations, topology spread, volume claims, the pod's requests and limits, and each container's name, requests, limits and host ports (and an init container's restart policy). Of the labels, only the keys that a required placement rule of any pod uses, and `addonmanager.kubernetes.io/mode`. Pods that have ended (Succeeded or Failed) are left out;
+- **pods:** name, namespace, controller, phase, node, overhead, node selector, required node affinity, required pod affinity and anti-affinity, tolerations, topology spread, volume claims, the pod's requests and limits, and each container's name, requests, limits and host ports (and an init container's restart policy). Of the labels, only the keys that a required placement rule of any pod or a PodDisruptionBudget's selector uses, and `addonmanager.kubernetes.io/mode`. Pods that have ended (Succeeded or Failed) are left out;
 - **ReplicaSets and Jobs:** name, namespace and controller;
 - **volume claims and volumes:** names, the claim's namespace and volume, the volume's node affinity, CSI driver and disk type;
 - **CSINodes:** each driver's attach limit;
-- **LimitRanges:** namespace, type, min, max and maxLimitRequestRatio.
+- **LimitRanges:** namespace, type, min, max and maxLimitRequestRatio;
+- **HorizontalPodAutoscalers:** namespace, and the kind and name of the object each one scales;
+- **PodDisruptionBudgets:** namespace, selector and minAvailable.
+
+A cluster whose HorizontalPodAutoscalers or PodDisruptionBudgets can't be listed is still read: it gets no step 5, and the report says why.
 
 It never reads Secrets or ConfigMaps, and it never keeps env values, images, commands, annotations or pod IPs.
 
@@ -74,7 +78,7 @@ It never reads Secrets or ConfigMaps, and it never keeps env values, images, com
 
 **Machine types,** for each region with a node pool whose type may change (step 3): for AKS, the VM sizes Azure Compute offers your subscription there (vCPUs, memory, CPU architecture, GPUs, premium disk and Ultra Disk support, data-disk slots and zones); for EKS, `aws ec2 describe-instance-types` (vCPUs, memory, architectures, GPUs, network interfaces and EBS limits) and `aws ec2 describe-instance-type-offerings` (the zones that offer each type).
 
-**Machine prices,** for today's machines and the types step 3 compares: for AKS, the public Azure Retail Prices API (prices.azure.com); for EKS, the AWS Price List API and the region's EC2 spot price history, through `aws`.
+**Machine prices,** for today's machines and the types step 3 compares, at the regular price and at spot: for AKS, the public Azure Retail Prices API (prices.azure.com); for EKS, the AWS Price List API and the region's EC2 spot price history, through `aws`.
 
 ### Disks
 
@@ -175,7 +179,7 @@ Nothing. There is no upload and no telemetry, and you send the report yourself. 
 
 - It goes in the current folder, or in the folder `--out` names, made if it is missing. The run checks that it can write there before it reads anything.
 - It never overwrites an earlier report: a second report in the same minute gets `-2`, `-3` and so on.
-- Page 1 shows the monthly cost today of everything the run read, the cost after, the saving and its share of the cost today, and where the saving comes from. The Kubernetes pages show each cluster's steps, node pools and workloads, and the Disks pages each account's VMs. Then Not in the saving yet lists everything the run couldn't read or count, with the reason.
+- Page 1 shows the monthly cost today of everything the run read, the cost after, the saving and its share of the cost today, and where the saving comes from, with the assumption beside each figure that rests on one. The Kubernetes pages show each cluster's steps, node pools, workloads and the apps that run fewer copies at quiet times; the Disks pages show each account's VMs. Then Not in the saving yet lists everything the run couldn't read or count, with the reason.
 - It names your subscriptions, AWS account ids, clusters, node pools, namespaces, workloads and VMs, and in some reasons a mount point. `--anonymize` hides them.
 - When the run finds no cluster machine or VM data disk with a list price, it writes no report, and it prints why.
 
@@ -194,7 +198,7 @@ npx zoorik assess --anonymize
 | `--no-invoke` | Never use `az aks command invoke`. The AKS clusters only it can read are named as not assessed. |
 | `--anonymize` | Hide every name the report shows (subscriptions, accounts, clusters, node pools, namespaces, workloads, VMs and mount points) behind short hashes, salted for this run. Machine types, disk types and regions stay. The terminal still shows the real names. |
 
-`zoorik assess --help` lists them, with the Kubernetes steps, and `zoorik --version` prints the version.
+`zoorik assess --help` lists them, with the Kubernetes steps and the assumptions of steps 5 and 6, and `zoorik --version` prints the version.
 
 ## Access it needs
 
@@ -223,7 +227,7 @@ The identity that created an EKS cluster usually has an access entry already. Fo
 **Inside each cluster:** the identity needs `get` and `list`, cluster-wide, on what the run reads. If it doesn't have them, a cluster admin can create this role and bind it. Replace `GROUP` with the Kubernetes group from the EKS access entry, or with the Entra ID group's object ID on AKS:
 
 ```bash
-kubectl create clusterrole zoorik-assess-read --verb=get,list --resource=nodes,pods,replicasets.apps,jobs.batch,persistentvolumeclaims,persistentvolumes,csinodes.storage.k8s.io,limitranges,pods.metrics.k8s.io
+kubectl create clusterrole zoorik-assess-read --verb=get,list --resource=nodes,pods,replicasets.apps,jobs.batch,persistentvolumeclaims,persistentvolumes,csinodes.storage.k8s.io,limitranges,horizontalpodautoscalers.autoscaling,poddisruptionbudgets.policy,pods.metrics.k8s.io
 kubectl create clusterrolebinding zoorik-assess-read --clusterrole=zoorik-assess-read --group=GROUP
 ```
 
@@ -275,14 +279,28 @@ Each cluster's saving is worked out in steps. Each step works on what the step b
 - An AKS system pool keeps at least 1 machine. Any other pool may reach 0.
 - A packing that doesn't make the cluster cost less is not applied.
 
+**Step 5, fewer copies at quiet times.** Apps with copies to spare run fewer of them for half of the hours, 12 a day, and today's count for the other half.
+- An app is a Deployment or an Argo Rollout, and its copies are its pods the run read. StatefulSets, DaemonSets and Jobs stay as they are.
+- An app with 3 or more copies and no HorizontalPodAutoscaler of its own (one whose scale target is the app, such as those KEDA creates) runs at its minimum at quiet times: 2 copies, or one more than the largest whole-number `minAvailable` of the PodDisruptionBudgets that select its pods, if that is higher. A percentage `minAvailable` and a `maxUnavailable` don't raise it. The copies kept are its first by name.
+- An app whose minimum is at or above its copies stays as it is, and so does an app the platform puts back as it was (`addonmanager.kubernetes.io/mode: Reconcile`).
+- At quiet times the pods are packed onto as few of step 4's machines as hold them, by step 4's rules. No pool grows, and a pool may shrink to the platform's minimum.
+- The saving is half of step 4's monthly cost less half of the quiet hours' monthly cost, at regular prices.
+- A cluster whose HorizontalPodAutoscalers or PodDisruptionBudgets couldn't be read gets no step 5, and the report says why.
+- The report states the assumption beside the figure: each app with 3 or more copies and no autoscaler of its own runs at 2 copies (or its disruption budget's floor) for 12 hours a day.
+
+**Step 6, spot.** The machines running at quiet times are counted on spot for those 12 hours a day, and step 4's machines at their regular price for the other 12. One formula holds for every cluster: a line's month costs 730 × (0.5 × its machines after step 4 × the regular price + 0.5 × its machines at quiet times × the spot price).
+- An AKS system pool stays on regular machines, and a line on spot today stays as it is.
+- A line whose machine type has no spot price keeps its regular price in both halves, and the report names it with the reason.
+- The report states the assumption beside the figure: the machines running at quiet times, 12 h a day, on spot.
+
 **Costs.**
-- A line (a pool's machines of one type, regular or spot) costs its machines' hourly list price × 730 hours, rounded to whole dollars. A line with no list price counts in no total, and the report names it with the reason.
+- A line (a pool's machines of one type, regular or spot) costs its machines' hourly list price × 730 hours, rounded to whole dollars. From step 5, half of those hours are the quiet hours, with the line's machines then, which step 6 prices at spot. A line with no list price counts in no total, and the report names it with the reason.
 - A step that would cost more than the state before it is not applied. So no step is negative, and the steps add up exactly to the cost today less the cost after.
 - The workload table splits the saving of smaller pods and spare machines, packing included (steps 1, 2 and 4), by the CPU and memory each workload frees. A raised workload frees nothing. The shares add up to that saving exactly, and are never added on top of it.
 
 **Prices** are USD list prices:
-- **Azure:** for each machine type in its region, the cheapest Linux pay-as-you-go price above zero, or its Spot price for a pool on Spot today;
-- **AWS:** Linux on-demand, with shared tenancy and no preinstalled software, from the Price List; for a pool on spot today, the average over the region's zones of each zone's latest spot price.
+- **Azure:** for each machine type in its region, the cheapest Linux pay-as-you-go price above zero, and its Spot price, for a pool on Spot today and for step 6;
+- **AWS:** Linux on-demand, with shared tenancy and no preinstalled software, from the Price List; for a pool on spot today and for step 6, the average over the region's zones of each zone's latest spot price.
 
 Only Linux machines are priced. A machine whose labels don't give its type, or whose pool doesn't say whether it runs on spot, is not priced, with the reason.
 
@@ -351,7 +369,7 @@ A VM that needs a fix first, such as a kernel below 5.14 or Azure Disk Encryptio
 **Named in the report, under Not in the saving yet, with the reason:**
 - a cloud whose CLI can't read, the subscriptions of other Azure directories, and each subscription or region whose clusters or VMs couldn't be listed;
 - each cluster not assessed, such as a stopped cluster, one whose API server the run can't reach, or one it has no access to;
-- in an assessed cluster: machines with no list price, usage that couldn't be read, pods with no controller, workloads kept at today's requests because their machines have no room to raise them, nodes that are not machines, and why cheaper machine types couldn't be counted (machine types the run couldn't read, or a node the allocatable rules don't reproduce);
+- in an assessed cluster: machines with no list price, usage that couldn't be read, pods with no controller, workloads kept at today's requests because their machines have no room to raise them, nodes that are not machines, why cheaper machine types couldn't be counted (machine types the run couldn't read, or a node the allocatable rules don't reproduce), why fewer copies at quiet times couldn't be counted (HorizontalPodAutoscalers or PodDisruptionBudgets the run couldn't read), and machines at quiet times with no spot price;
 - each VM with data disks that is not in the saving, such as:
   - Windows; a Linux kernel without btrfs; or no mounted data disk other than shared disks;
   - on Azure, a VM in a resource group another Azure service manages, such as Azure Databricks, or a VM size with fewer than 8 data-disk slots;
@@ -367,6 +385,8 @@ Every figure in the report is one of these:
 - read from your clouds or your clusters;
 - read from the public price lists;
 - computed from those by the method above.
+
+Steps 5 and 6 also rest on an assumption each, which the report states beside their figures: how many hours a day apps run fewer copies, and that the machines of those hours run spot.
 
 When a figure can't be known, the report gives the reason instead of a number: a node pool with no list price shows Not priced and why, and a cluster or VM with no estimate is listed under Not in the saving yet, with the reason. Nothing is guessed or filled in.
 

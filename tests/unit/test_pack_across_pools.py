@@ -216,7 +216,7 @@ class PoolLimitTest(unittest.TestCase):
         larges = [machine(name, pool=large.id, machine_type=D8S, allocatable=room) for name in ("l1", "l2")]
         pods = [placed(api_pod(f"l-{index}", 2500, GIB), f"l{1 + index // 3}", large.id) for index in range(6)]
         before = state([small, large], [machine("s1", pool=small.id), *larges], pods)
-        packed = across(before)
+        packed = across(before, grow=True)
         if packed is None:
             raise AssertionError("the pods found no packing")
         self.assertEqual((cost(before), cost(packed), machines_of(packed)), (394, 438, {small.id: 6}))

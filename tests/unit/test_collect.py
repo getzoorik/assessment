@@ -8,7 +8,7 @@ from tests.unit.fleet import api_pod
 from zoorik.cloud.aws import Ec2Instance, NodeGroup
 from zoorik.cloud.azure import AgentPool
 from zoorik.cloud.keys import AWS, AZURE
-from zoorik.kubectl.api import Snapshot
+from zoorik.kubectl.api import Scaling, Snapshot
 from zoorik.kubectl.objects import (
     AffinityTerm,
     CsiNode,
@@ -48,7 +48,7 @@ def node(name: str, labels: Mapping[str, str], provider_id: Optional[str] = None
 
 def snapshot(nodes: Sequence[Node], pods: Sequence[ApiPod] = (), **kinds: Any) -> Snapshot:
     """Make a snapshot of nodes and pods, with any other kind given by name."""
-    made = Snapshot(tuple(nodes), tuple(pods), (), (), (), (), (), Usage({}, None))
+    made = Snapshot(tuple(nodes), tuple(pods), (), (), (), (), (), Scaling((), (), None), Usage({}, None))
     return replace(made, **kinds)
 
 

@@ -1,7 +1,7 @@
 """Typed reads of JSON answers: each field as its API documents it, and UnexpectedResponse for any other shape."""
 
 import json
-from typing import Dict, List, Mapping, Optional, TypeVar
+from typing import Dict, List, Mapping, Optional, TypeVar, Union
 
 from zoorik.errors import UnexpectedResponse
 
@@ -72,6 +72,13 @@ class Record:
         if value is None or (isinstance(value, int) and not isinstance(value, bool)):
             return value
         raise self._wrong(key, "a whole number")
+
+    def optional_whole_or_text(self, key: str) -> Union[int, str, None]:
+        """Read an optional field that holds a whole number or a text, as a Kubernetes int-or-string field does."""
+        value = self._fields.get(key)
+        if value is None or isinstance(value, str) or (isinstance(value, int) and not isinstance(value, bool)):
+            return value
+        raise self._wrong(key, "a whole number or a text")
 
     def number(self, key: str) -> float:
         """Read a required number."""

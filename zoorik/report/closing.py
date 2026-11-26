@@ -2,8 +2,9 @@
 
 "Not in the saving yet" names everything the run couldn't read or count, each with its reason: a cloud, another Azure
 directory, a subscription or region not listed, a cluster not assessed, a cluster's machines with no list price, its
-pods left in place, its workloads kept at today's requests, its nodes that are not machines and its cheaper machine
-types when they can't be counted, and each VM without a saving.
+pods left in place, its workloads kept at today's requests, its nodes that are not machines, its cheaper machine types
+and its fewer copies at quiet times when they can't be counted, its machines with no spot price, and each VM without a
+saving.
 """
 
 from dataclasses import dataclass
@@ -115,6 +116,12 @@ def cluster_issues(cluster: ClusterResult) -> str:
         issues.append(f"{count(cluster.not_machines, 'node')} not counted: Fargate and virtual nodes are not machines")
     if cluster.cheaper_types is not None:
         issues.append(f"cheaper machine types not counted: {cluster.cheaper_types}")
+    if cluster.fewer_copies is not None:
+        issues.append(f"fewer copies at quiet times not counted: {cluster.fewer_copies}")
+    regular = [line for line in cluster.lines if line.spot_note and line.quiet]
+    if regular:
+        notes = "; ".join(sorted({line.spot_note for line in regular}))
+        issues.append(f"{count(sum(line.quiet for line in regular), 'machine')} not on spot at quiet times: {notes}")
     return "; ".join(issues)
 
 

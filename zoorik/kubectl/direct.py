@@ -2,14 +2,14 @@
 
 import os
 from dataclasses import dataclass
-from typing import Dict, List, Mapping, Optional, Sequence
+from typing import Dict, List, Mapping, Optional, Sequence, Union
 from urllib.parse import urlencode
 
 from zoorik.cloud.cli import Host, Reason, reason_row, summary
 from zoorik.cloud.fields import parse_json
 from zoorik.errors import ApiUnreachable, AssessmentError, ClusterUnreadable, ToolNotInstalled
 from zoorik.kubectl.api import PAGE_SIZE, REQUEST_TIMEOUT, Snapshot, snapshot
-from zoorik.kubectl.objects import KINDS, Json, Kind, slim_page
+from zoorik.kubectl.objects import KINDS, SCALING_KINDS, Json, Kind, slim_page
 from zoorik.kubectl.usage import SAMPLE_INTERVAL, ContainerKey, Peak, SampleWindow, Usage, top_table, usage_of
 from zoorik.system.process import Completed
 
@@ -95,7 +95,8 @@ class DirectKubeApi:
         if checked.exit != 0:
             raise failure(checked.stderr)
         items: Dict[str, List[Json]] = {kind.name: self._list(kind) for kind in KINDS}
-        return snapshot(items, self._usage(window))
+        scaling = {kind.name: self._list_or_reason(kind) for kind in SCALING_KINDS}
+        return snapshot(items, scaling, self._usage(window))
 
     def _convert(self) -> None:
         """Make the kubeconfig sign in through kubelogin with the Azure CLI's sign-in."""
@@ -130,6 +131,13 @@ class DirectKubeApi:
             if page.token is None:
                 return items
             token = page.token
+
+    def _list_or_reason(self, kind: Kind) -> Union[List[Json], str]:
+        """List every item of a kind the cluster is read without, or give the reason it couldn't be listed."""
+        try:
+            return self._list(kind)
+        except AssessmentError as error:
+            return str(error)
 
     def _usage(self, window: SampleWindow) -> Usage:
         """Take the window's samples, SAMPLE_INTERVAL seconds apart from its start; a sample that fails is skipped."""

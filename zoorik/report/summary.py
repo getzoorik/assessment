@@ -1,8 +1,9 @@
 """Page 1: the cost a month today of everything the run read, the cost after, the saving and its share, and its rows.
 
 The cost today is the priced machines of every assessed cluster plus every priced VM data disk, each counted once. The
-rows that apply follow: each row the Kubernetes steps count in, in the steps' order, then disks. They add up to the
-saving exactly. The headline names the saving and only the rows that saved something; it credits no product.
+rows that apply follow: each row the Kubernetes steps count in, in the steps' order, then disks, each with the
+assumption its figure rests on. They add up to the saving exactly. The headline names the saving and only the rows
+that saved something; it credits no product.
 """
 
 from dataclasses import dataclass
@@ -13,7 +14,7 @@ from zoorik.disks.model import DisksResult
 from zoorik.format import count, usd
 from zoorik.kubernetes.model import KubernetesResult
 from zoorik.report.blocks import GAP, Card, Cell, Column, Kpi, Kpis, Report, Table, Title, headline, text
-from zoorik.report.figures import less, percent, saving_cell
+from zoorik.report.figures import assumption, less, percent, saving_cell
 from zoorik.report.pdf import GREEN_INK, MM, MUTED, Span, Style
 
 DISKS_ROW = "disks"
@@ -23,10 +24,12 @@ MONTHS_A_YEAR = 12
 
 @dataclass(frozen=True)
 class Row:
-    """A page-1 row: a kind of change, and what it saves a month, in whole dollars."""
+    """A page-1 row: a kind of change, what it saves a month, in whole dollars, and the assumption it rests on."""
 
     name: str
     saving: int
+    # "" for a row that rests on none.
+    assumption: str
 
 
 @dataclass(frozen=True)
@@ -51,16 +54,19 @@ class Summary:
 def summary(kubernetes: KubernetesResult, disks: DisksResult) -> Summary:
     """Add up both parts; each part's rows apply when it has a cost today."""
     rows: Dict[str, int] = {}
+    assumptions: Dict[str, str] = {}
     if kubernetes.today > 0:
         for cluster in kubernetes.clusters:
             for step in cluster.steps:
                 rows[step.row] = rows.get(step.row, 0) + step.saving
+                assumptions[step.row] = step.assumption
     if disks.today > 0:
         rows[DISKS_ROW] = disks.saving
+        assumptions[DISKS_ROW] = ""
     return Summary(
         today=kubernetes.today + disks.today,
         after=kubernetes.after + disks.after,
-        rows=tuple(Row(name, saving) for name, saving in rows.items()),
+        rows=tuple(Row(name, saving, assumptions[name]) for name, saving in rows.items()),
     )
 
 
@@ -109,7 +115,10 @@ def page_one(report: Report, figures: Summary, disclosed: str) -> None:
         Kpi(f"{figures.share}%", "of the cost\ntoday", GREEN_INK),
     ]
     report.add(Kpis(kpis), 6 * MM)
-    rows = [[Cell(row.name[:1].upper() + row.name[1:]), saving_cell(row.saving)] for row in figures.rows]
+    rows = [
+        [Cell(row.name[:1].upper() + row.name[1:], assumption(row.assumption)), saving_cell(row.saving)]
+        for row in figures.rows
+    ]
     table = Table([Column(0.72), Column(0.28, "r")], ["Change", "Saving"], rows, ["Total", saving_cell(figures.saving)])
     report.add(Card.of(table, Title("Where the saving comes from", "a month, at list prices")), GAP)
     report.add(text(disclosed, Style(8.25, MUTED), 1.5), 3 * MM)

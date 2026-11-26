@@ -15,6 +15,8 @@ from tests.replay.clusters import (
     AKS,
     SAMPLES,
     Cluster,
+    autoscaler,
+    budget,
     container,
     direct_calls,
     invoke_call,
@@ -49,7 +51,8 @@ from tests.replay.scenarios import (
 )
 from zoorik.cloud.aws import AWS, AwsScope
 from zoorik.cloud.azure import AZURE, AzureScope
-from zoorik.kubectl.objects import Json
+from zoorik.kubectl.api import PAGE_SIZE
+from zoorik.kubectl.objects import BUDGETS, Json
 from zoorik.kubectl.usage import SampleWindow
 from zoorik.pricing.retail import RETAIL_PRICES_URL
 
@@ -80,6 +83,10 @@ REFUSED_AZURE = (
     "'Microsoft.ContainerService/managedClusters/read'.\n"
 )
 REFUSED_AWS = "An error occurred (AccessDeniedException) when calling the operation: User is not authorized.\n"
+REFUSED_BUDGETS = (
+    'Error from server (Forbidden): poddisruptionbudgets.policy is forbidden: User "someone" cannot list resource '
+    '"poddisruptionbudgets" in API group "policy" at the cluster scope\n'
+)
 TIMED_OUT = "Unable to connect to the server: dial tcp 192.0.2.10:443: i/o timeout\n"
 
 
@@ -236,10 +243,13 @@ VM_TYPES = (
 )
 
 
-def aks_node(name: str) -> Json:
-    """Make a D4s v5 node of the System pool in zone 1, with what AKS's reservation for 110 pods leaves allocatable."""
+def aks_node(name: str, pool: str = "system", taints: Sequence[Json] = ()) -> Json:
+    """Make a D4s v5 node of an agent pool in zone 1, with what AKS's reservation for 110 pods leaves allocatable."""
     record = node(name, "westeurope-1")
+    record["metadata"]["labels"]["kubernetes.azure.com/agentpool"] = pool
     record["status"]["allocatable"]["memory"] = "13986964Ki"
+    if taints:
+        record["spec"]["taints"] = list(taints)
     return record
 
 
@@ -279,9 +289,47 @@ def worked_figure(window: SampleWindow = WINDOW) -> Cluster:
         "persistentvolumes": [],
         "csinodes": [],
         "limitranges": [],
+        "horizontalpodautoscalers": [],
+        "poddisruptionbudgets": [],
     }
     sample = top(*(f"shop  {name}  app  700m  1000Mi" for names in layout.values() for name in names))
     return Cluster(objects, (sample,) * window.samples)
+
+
+def quiet_hours() -> Cluster:
+    """Make a System pool of one machine that only critical add-ons tolerate, and a pool apps of six holding three apps.
+
+    web, api and cart each run 4 copies, two to a machine, that ask 1500m and 2 GiB and peak at 900m and 1000 MiB.
+    api has an autoscaler of its own, and a disruption budget keeps 2 of cart's copies available.
+    """
+    critical = [{"key": "CriticalAddonsOnly", "value": "true", "effect": "NoSchedule"}]
+    machines = [f"apps-{number}" for number in range(1, 7)]
+    replica_sets = {"web": "web-7b9c8d6f5", "api": "api-6c8d7e5f4", "cart": "cart-5d7e6f4a3"}
+    copies = [(app, f"{app}-{number}") for app in replica_sets for number in range(1, 5)]
+    pods = [
+        pod(
+            "shop",
+            name,
+            machines[index // 2],
+            [container("app", {"cpu": "1500m", "memory": "2Gi"})],
+            labels={"app": app},
+            owners=[owner("ReplicaSet", replica_sets[app])],
+        )
+        for index, (app, name) in enumerate(copies)
+    ]
+    objects: Dict[str, List[Json]] = {
+        "nodes": [aks_node("system-1", taints=critical), *(aks_node(machine, "apps") for machine in machines)],
+        "pods": pods,
+        "replicasets": [owned("shop", name, [owner("Deployment", app)]) for app, name in replica_sets.items()],
+        "jobs": [],
+        "persistentvolumeclaims": [],
+        "persistentvolumes": [],
+        "csinodes": [],
+        "limitranges": [],
+        "horizontalpodautoscalers": [autoscaler("shop", "api")],
+        "poddisruptionbudgets": [budget("shop", "cart", {"matchLabels": {"app": "cart"}}, minAvailable=2)],
+    }
+    return Cluster(objects, (top(*(f"shop  {name}  app  900m  1000Mi" for _, name in copies)),))
 
 
 def azure_scenario(name: str, calls: Sequence[Call], fetches: Sequence[Fetch] = ()) -> KubernetesScenario:
@@ -307,13 +355,15 @@ def invoked(scenario: str, name: str, access: Mapping[str, object]) -> Kubernete
 
 
 def aks_public(window: SampleWindow = WINDOW, others: Sequence[Json] = ()) -> KubernetesScenario:
-    """Read a public cluster with kubectl over window: the worked figure, $730 a month to $438, then $372.
+    """Read a public cluster with kubectl over window: the worked figure, $730 a month to $438, then $372, then $248.
 
     Each pod asks 910m and 1300 MiB after step 1, so four fit a machine and the twelve need three; the System pool keeps
     three of its five machines, below its autoscaler's minimum of five. A frees 2000m and 4096 MiB and B 1000m and
     12288 MiB, so A's share is $134 and B's $158. Step 3: an F4s v2 gives pods 3860m and 5857 MiB, so four fit one
-    and the twelve need three F4s v2 at $0.17 an hour: $372, a saving of $66. Step 4 saves nothing, with one pool. The
-    subscription's other clusters are others.
+    and the twelve need three F4s v2 at $0.17 an hour: $372, a saving of $66. Step 4 saves nothing, with one pool. Step
+    5: at quiet times A and B run 2 copies each, and the four fit one F4s v2: 730 x (0.5 x 3 + 0.5 x 1) x $0.17 is
+    $248, a saving of $124. Step 6 saves nothing, as a System pool stays regular. The subscription's other clusters are
+    others.
     """
     name = "cluster-public"
     pools = [agent_pool("system", "System", 5)]
@@ -321,6 +371,44 @@ def aks_public(window: SampleWindow = WINDOW, others: Sequence[Json] = ()) -> Ku
     reads = direct_calls(worked_figure(window), kubeconfig=kubeconfig("aks", SUB, GROUP, name))
     calls = [aks_list(record, *others), credentials(name), *reads, skus(*VM_TYPES)]
     return azure_scenario("aks-public", calls, (CANDIDATE_PRICES,))
+
+
+def quiet_hours_reads(refused: bool) -> List[Call]:
+    """Make the answers for reading the quiet-hours cluster, with its disruption budgets' list refused when refused.
+
+    The region offers D4s v5 alone, so step 3 has no cheaper type to count.
+    """
+    name = "cluster-quiet"
+    pools = [agent_pool("system", "System", 1), agent_pool("apps", "User", 6)]
+    record = aks_record(name, agentPoolProfiles=pools, apiServerAccessProfile={"enablePrivateCluster": False})
+    path = kubeconfig("aks", SUB, GROUP, name)
+    reads = direct_calls(quiet_hours(), kubeconfig=path)
+    if refused:
+        budgets = kubectl("get", "--raw", f"{BUDGETS.path}?limit={PAGE_SIZE}", kubeconfig=path)
+        refusal = call(budgets, exit_code=1, stderr=REFUSED_BUDGETS)
+        reads = [refusal if each.argv == budgets else each for each in reads]
+    return [aks_list(record), credentials(name), *reads, skus(VM_TYPES[0])]
+
+
+def aks_quiet_hours() -> KubernetesScenario:
+    """Read the quiet-hours cluster with kubectl: $1,022 a month to $730, then $657 with fewer copies, then $482.
+
+    The System pool's machine stays, as no app tolerates its taint, and stays regular. After step 1 each pod asks 1170m
+    and 1300 MiB, so three fit a machine and the twelve need four of apps' six, a saving of $292. At quiet times web
+    runs 2 copies and cart 3, one more than its budget's minAvailable; api keeps its 4, which its autoscaler sets. The
+    nine fit three machines: 730 x (0.5 x 4 + 0.5 x 3) x $0.20 is $511 for apps, a saving of $73. Those three run spot
+    at $0.04 then: 730 x (0.5 x 4 x 0.20 + 0.5 x 3 x 0.04) is $336, a saving of $175.
+    """
+    return azure_scenario("aks-quiet-hours", quiet_hours_reads(False), (MACHINE_PRICES,))
+
+
+def aks_quiet_hours_not_counted() -> KubernetesScenario:
+    """Read the quiet-hours cluster with its disruption budgets refused and no spot price: $1,022 to $730, then no more.
+
+    Without its budgets no app is counted at fewer copies, and without a spot price apps' four machines stay regular at
+    quiet times too; the cluster names both reasons.
+    """
+    return azure_scenario("aks-quiet-hours-not-counted", quiet_hours_reads(True), (machine_prices(D4S_ITEMS[0]),))
 
 
 def aks_private() -> KubernetesScenario:
@@ -476,6 +564,8 @@ def node_kinds(window: SampleWindow = WINDOW) -> Cluster:
         "persistentvolumes": [],
         "csinodes": [],
         "limitranges": [],
+        "horizontalpodautoscalers": [],
+        "poddisruptionbudgets": [],
     }
     sample = top(
         "shop  web-1  app  100m  200Mi",
@@ -656,6 +746,8 @@ def eks_named() -> KubernetesScenario:
 
 SCENARIOS = (
     aks_public(),
+    aks_quiet_hours(),
+    aks_quiet_hours_not_counted(),
     aks_private(),
     aks_authorized_ranges(),
     aks_no_invoke(),
