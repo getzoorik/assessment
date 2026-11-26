@@ -72,7 +72,9 @@ It never reads Secrets or ConfigMaps, and it never keeps env values, images, com
 
 **Self-managed EKS nodes:** `aws ec2 describe-instances` gives each node's Auto Scaling group and whether it runs on spot.
 
-**Machine prices:** for AKS, the public Azure Retail Prices API (prices.azure.com); for EKS, the AWS Price List API and the EC2 spot price history, through `aws`.
+**Machine types,** for each region with a node pool whose type may change (step 3): for AKS, the VM sizes Azure Compute offers your subscription there (vCPUs, memory, CPU architecture, GPUs, premium disk and Ultra Disk support, data-disk slots and zones); for EKS, `aws ec2 describe-instance-types` (vCPUs, memory, architectures, GPUs, network interfaces and EBS limits) and `aws ec2 describe-instance-type-offerings` (the zones that offer each type).
+
+**Machine prices,** for today's machines and the types step 3 compares: for AKS, the public Azure Retail Prices API (prices.azure.com); for EKS, the AWS Price List API and the region's EC2 spot price history, through `aws`.
 
 ### Disks
 
@@ -192,7 +194,7 @@ npx zoorik assess --anonymize
 | `--no-invoke` | Never use `az aks command invoke`. The AKS clusters only it can read are named as not assessed. |
 | `--anonymize` | Hide every name the report shows (subscriptions, accounts, clusters, node pools, namespaces, workloads, VMs and mount points) behind short hashes, salted for this run. Machine types, disk types and regions stay. The terminal still shows the real names. |
 
-`zoorik assess --help` lists them, and `zoorik --version` prints the version.
+`zoorik assess --help` lists them, with the Kubernetes steps, and `zoorik --version` prints the version.
 
 ## Access it needs
 
@@ -206,7 +208,7 @@ When a cluster, a subscription, a region or a VM can't be read, the run goes on,
 
 **AWS:**
 - `ec2:DescribeRegions`;
-- for the clusters, `eks:ListClusters`, `eks:DescribeCluster`, `eks:ListNodegroups`, `eks:DescribeNodegroup`, `ec2:DescribeInstances` and `ec2:DescribeSpotPriceHistory`;
+- for the clusters, `eks:ListClusters`, `eks:DescribeCluster`, `eks:ListNodegroups`, `eks:DescribeNodegroup`, `ec2:DescribeInstances`, `ec2:DescribeInstanceTypes`, `ec2:DescribeInstanceTypeOfferings` and `ec2:DescribeSpotPriceHistory`;
 - for the disks, `ec2:DescribeInstances`, `ec2:DescribeVolumes`, `ec2:DescribeInstanceTypes`, `ssm:DescribeInstanceInformation` and `cloudwatch:GetMetricStatistics`;
 - `pricing:GetProducts`;
 - for the read inside instances, `ssm:SendCommand` (on the instances and the `AWS-RunShellScript` document) and `ssm:GetCommandInvocation`. An instance also needs the Systems Manager agent, registered with Systems Manager;
@@ -256,14 +258,23 @@ Each cluster's saving is worked out in steps. Each step works on what the step b
 - A packing that needs as many machines as today is not applied.
 - An AKS system pool keeps at least 1 machine. Any other pool may reach 0. The autoscaler's minimum is not kept.
 
+**Step 3, cheaper machine types.** Each pool moves to the cheapest machine type, or mix of two types, that the search below finds, when that costs less than the pool after step 2. The packing follows step 2's rules, on new machines of each type in the pool's zones.
+- A candidate type has the pool's CPU architecture, doesn't burst (Azure's B-series, AWS's burstable types), has no GPU, and is offered to your subscription or account in every zone the pool uses. On AKS it has at least 2 vCPUs and 4 GiB, below which AKS refuses a node size. Where the pool's pods use Azure disks of a premium tier (Premium SSD, Premium SSD v2 or Ultra Disk, or an in-tree `azureDisk` volume, which doesn't name its tier), it takes premium disks, and where they use Ultra Disk, it offers Ultra Disk in those zones.
+- These pools keep their machine types: a pool with GPUs; a pool whose machines are bought both regular and spot, or one with a machine that has no list price; and a pool with a pod that selects its machine type (`node.kubernetes.io/instance-type`, or another label that comes from the type) or requests a resource other than CPU, memory and ephemeral storage, such as a GPU or hugepages.
+- What a new machine would give pods comes from your nodes. CPU is the type's vCPUs. Memory is its listed memory × the smallest share of their listed memory your nodes report. Pods and ephemeral storage are the pool's, and the attach limit follows the CSI driver's rule for the type. From these it takes the platform's reservation for the pool's Kubernetes version and max pods (AKS's, or the EKS node images'), and the eviction threshold. The run first checks these rules on each node of the pools that may change: allocatable CPU and memory within 1%, pods and attach limits exactly. When a node misses, the cluster gets no step 3, and the report says why.
+- The search: each candidate gets a lower bound, its price × the machines the pool's pods need on their scarcest resource. Single types are packed in lower-bound order until the next lower bound reaches the cheapest cost found. A type is skipped when one tried before it, whose machines would join the same pool, covers it: the same CPU architecture, at least as much of every resource and disk slot, and no higher price. So types that give the same room at the same price count once. Then, from the cheapest single type, for each k the pods of its k least-full machines move to new machines of a type it doesn't cover, packed in the same order and with the same stop, while its other machines keep their pods. A pool's search runs at most 20 packings, the mixes after the single types. The pool takes the cheapest of these. The search doesn't try every mix, so a cheaper one may exist.
+- An AKS node pool or an EKS managed node group runs one machine type, so a mix's second type becomes a new pool beside it: the pool's labels, except its name, and its taints, in User mode. A pod that selects the pool by its name stays on the first type. A Karpenter NodePool or an Auto Scaling group holds both types.
+- A pool on spot today is compared at spot prices.
+- The run doesn't read your vCPU quotas: a cheaper type may need a quota increase first.
+
 **Costs.**
 - A line (a pool's machines of one type, regular or spot) costs its machines' hourly list price × 730 hours, rounded to whole dollars. A line with no list price counts in no total, and the report names it with the reason.
 - A step that would cost more than the state before it is not applied. So no step is negative, and the steps add up exactly to the cost today less the cost after.
 - The workload table splits the saving of smaller pods and spare machines by the CPU and memory each workload frees. A raised workload frees nothing. The shares add up to that saving exactly, and are never added on top of it.
 
 **Prices** are USD list prices:
-- **Azure:** for each machine type in its region, the cheapest Linux pay-as-you-go price above zero, or its Spot price for a machine on Spot today;
-- **AWS:** Linux on-demand, with shared tenancy and no preinstalled software, from the Price List; for a machine on spot today, the average over the region's zones of each zone's latest spot price.
+- **Azure:** for each machine type in its region, the cheapest Linux pay-as-you-go price above zero, or its Spot price for a pool on Spot today;
+- **AWS:** Linux on-demand, with shared tenancy and no preinstalled software, from the Price List; for a pool on spot today, the average over the region's zones of each zone's latest spot price.
 
 Only Linux machines are priced. A machine whose labels don't give its type, or whose pool doesn't say whether it runs on spot, is not priced, with the reason.
 
@@ -332,7 +343,7 @@ A VM that needs a fix first, such as a kernel below 5.14 or Azure Disk Encryptio
 **Named in the report, under Not in the saving yet, with the reason:**
 - a cloud whose CLI can't read, the subscriptions of other Azure directories, and each subscription or region whose clusters or VMs couldn't be listed;
 - each cluster not assessed, such as a stopped cluster, one whose API server the run can't reach, or one it has no access to;
-- in an assessed cluster: machines with no list price, usage that couldn't be read, pods with no controller, workloads kept at today's requests because their machines have no room to raise them, and nodes that are not machines;
+- in an assessed cluster: machines with no list price, usage that couldn't be read, pods with no controller, workloads kept at today's requests because their machines have no room to raise them, nodes that are not machines, and why cheaper machine types couldn't be counted (machine types the run couldn't read, or a node the allocatable rules don't reproduce);
 - each VM with data disks that is not in the saving, such as:
   - Windows; a Linux kernel without btrfs; or no mounted data disk other than shared disks;
   - on Azure, a VM in a resource group another Azure service manages, such as Azure Databricks, or a VM size with fewer than 8 data-disk slots;

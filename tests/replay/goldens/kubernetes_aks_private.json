@@ -7,6 +7,7 @@
   "clusters": [
    {
     "bare_pods": 2,
+    "cheaper_types": "the allocatable memory of its Standard_D4s_v5 nodes doesn't follow the platform's reservation",
     "cluster": {
      "account": "sub-one",
      "cloud": "azure",
@@ -40,6 +41,12 @@
       "before": 292,
       "name": "Spare machines",
       "row": "smaller pods and spare machines"
+     },
+     {
+      "after": 292,
+      "before": 292,
+      "name": "Cheaper machine types",
+      "row": "cheaper machine types"
      }
     ],
     "usage": null,

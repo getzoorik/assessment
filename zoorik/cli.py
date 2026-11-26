@@ -9,6 +9,7 @@ import argparse
 import os
 import shutil
 import sys
+import textwrap
 import traceback
 from concurrent import futures
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -56,6 +57,15 @@ DESCRIPTION = (
     f"AWS account the az and aws CLIs are signed in to, and writes one PDF report for you to email to {CONTACT}."
 )
 ASSESS = "read every signed-in Azure and AWS account and write the report"
+# The Kubernetes steps, one line each, below the options of assess --help.
+STEPS = (
+    "The Kubernetes saving, step by step, each step on what the one before left:\n"
+    "  1. smaller pods: each container's request becomes its peak use x 1.3\n"
+    "  2. spare machines: each pool's pods on as few of its machines as hold them\n"
+    "  3. cheaper machine types: the cheapest type, or mix of two, for each pool"
+)
+# argparse's own width on an 80-column terminal, which the description is wrapped to by hand beside the steps.
+HELP_WIDTH = 78
 START = "Zoorik cloud cost assessment {version}. It sends nothing to Zoorik; you send the report yourself."
 IDLE = (
     "Cloud Shell closes a session after 20 minutes without a key press, so press Enter now and then until the "
@@ -170,7 +180,14 @@ def options(argv: Sequence[str]) -> Options:
     command = argparse.ArgumentParser(prog="zoorik", description=DESCRIPTION, allow_abbrev=False)
     command.add_argument("--version", action="version", version=f"zoorik {__version__}")
     commands = command.add_subparsers(dest="command", required=True, metavar="assess", help=ASSESS)
-    assess_command = commands.add_parser("assess", description=DESCRIPTION, allow_abbrev=False)
+    assess_command = commands.add_parser(
+        "assess",
+        description=textwrap.fill(DESCRIPTION, HELP_WIDTH),
+        epilog=STEPS,
+        # The steps keep their lines, so the description is wrapped above.
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        allow_abbrev=False,
+    )
     assess_command.add_argument(
         "--out", metavar="PATH", help="the folder for the report, made if missing (default: the current folder)"
     )

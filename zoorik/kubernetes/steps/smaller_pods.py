@@ -21,9 +21,9 @@ from zoorik.kubernetes.placement import (
     every_container,
     largest,
     limits_of,
+    overheads,
     pod_request,
     pod_total,
-    pool_overhead,
     requests_of,
 )
 from zoorik.kubernetes.steps import SHARED_ROW
@@ -114,10 +114,7 @@ def was_raised(pod: ApiPod, requests: Mapping[str, Resources], pod_level: Option
 
 def loads(state: ClusterState) -> Dict[str, Dict[str, int]]:
     """Give what each machine holds as the steps count it: its pool's overhead and the requests of its other pods."""
-    overhead = {
-        pool.id: pool_overhead([pod for pod in state.pods if pod.pool == pool.id and pod.overhead])
-        for pool in state.pools
-    }
+    overhead = overheads(state)
     load = {machine.name: dict(overhead[machine.pool].requests) for machine in state.machines}
     for pod in state.pods:
         if not pod.overhead:

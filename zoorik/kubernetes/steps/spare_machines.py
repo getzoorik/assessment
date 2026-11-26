@@ -12,7 +12,7 @@ from typing import Mapping, Optional, Sequence, Tuple
 from zoorik.kubectl.quantity import CPU
 from zoorik.kubernetes.model import MEMORY, ClusterState, Machine, Pod, Pool, Resources
 from zoorik.kubernetes.packing import Job, pack
-from zoorik.kubernetes.placement import Overhead, Placed, demand_of, empty_room, fits_machine, pool_overhead
+from zoorik.kubernetes.placement import Overhead, Placed, demand_of, empty_room, fits_machine, overheads
 from zoorik.kubernetes.steps import SHARED_ROW, minimum
 
 # Cheapest first: a machine's price per share of the pods' demand, or, for a machine with no room for that demand, last.
@@ -46,16 +46,13 @@ def spare(state: ClusterState, pool: Pool) -> ClusterState:
     """Pack one pool's pods onto as few of its machines as hold them; the state as it was when that saves nothing."""
     machines = [machine for machine in state.machines if machine.pool == pool.id]
     by_name = {machine.name: machine for machine in state.machines}
-    overheads = {
-        each.id: pool_overhead([pod for pod in state.pods if pod.pool == each.id and pod.overhead])
-        for each in state.pools
-    }
+    overhead = overheads(state)
     names = {machine.name for machine in machines}
     pods = [pod for pod in state.pods if pod.node in names and not pod.overhead]
-    staying = {pod.key for pod in pods if pod.stays is not None or not fits_empty(pod, machines, overheads[pool.id])}
+    staying = {pod.key for pod in pods if pod.stays is not None or not fits_empty(pod, machines, overhead[pool.id])}
     moving = tuple(pod for pod in pods if pod.key not in staying)
     kept = {pod.node for pod in pods if pod.key in staying}
-    candidates = rank(pool, [machine for machine in machines if machine.name not in kept], moving, overheads[pool.id])
+    candidates = rank(pool, [machine for machine in machines if machine.name not in kept], moving, overhead[pool.id])
     fixed = tuple(
         Placed(pod, by_name[pod.node])
         for pod in state.pods
@@ -67,7 +64,7 @@ def spare(state: ClusterState, pool: Pool) -> ClusterState:
         opened=tuple(machine for machine in machines if machine.name in kept),
         candidates=candidates,
         others=tuple(machine for machine in state.machines if machine.pool != pool.id),
-        overheads=overheads,
+        overheads=overhead,
         cap=len(machines) - 1,
     )
     packing = pack(job)

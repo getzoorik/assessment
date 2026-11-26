@@ -123,7 +123,7 @@ def peaks(pods: Sequence[Pod], cpu: int, memory: int, container: str = "app") ->
 def local_volume(name: str, node: str) -> PersistentVolume:
     """Make a local volume, bound to one node by its required node affinity."""
     term = NodeSelectorTerm((Requirement(HOSTNAME, "In", (node,)),), ())
-    return PersistentVolume(name, "local.csi.example.test", None, (term,))
+    return PersistentVolume(name, "local.csi.example.test", None, (term,), False)
 
 
 def taint(key: str, effect: str = "NoSchedule", value: Optional[str] = None) -> Taint:

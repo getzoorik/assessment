@@ -214,9 +214,9 @@ class PodsTest(unittest.TestCase):
     def test_pods_whose_volumes_or_namespace_selectors_keep_them_on_their_node_stay(self) -> None:
         """A volume bound to the node, a claim bound to no volume read, or a namespace selector keeps the pod there."""
         local = PersistentVolume(
-            "pv-local", None, None, (NodeSelectorTerm((Requirement(HOSTNAME, "In", ("aks-apps-0",)),), ()),)
+            "pv-local", None, None, (NodeSelectorTerm((Requirement(HOSTNAME, "In", ("aks-apps-0",)),), ()),), False
         )
-        zonal = PersistentVolume("pv-zonal", "disk.csi.azure.com", "Premium_LRS", None)
+        zonal = PersistentVolume("pv-zonal", "disk.csi.azure.com", "Premium_LRS", None, False)
         by_label = AffinityTerm(
             LabelSelector({"app": "web"}, ()), (), LabelSelector({"team": "one"}, ()), HOSTNAME, (), ()
         )

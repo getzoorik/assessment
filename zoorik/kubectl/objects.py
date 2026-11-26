@@ -550,6 +550,8 @@ class PersistentVolume:
     tier: Optional[str]
     # The terms of its required node affinity, one of which a node must meet; None when it has none.
     node_affinity: Optional[Tuple[NodeSelectorTerm, ...]]
+    # An in-tree disk (azureDisk, awsElasticBlockStore), which names no tier.
+    in_tree: bool
 
 
 @dataclass(frozen=True)
@@ -763,15 +765,16 @@ def read_volume(record: Record) -> PersistentVolume:
     """Read one volume, as slim kept it: its attributes hold only the tier keys."""
     metadata, spec = record.record("metadata"), record.record("spec")
     csi = spec.optional_record("csi")
-    in_tree = (driver for key, driver in IN_TREE_DRIVERS if spec.optional_record(key) is not None)
+    in_tree = next((driver for key, driver in IN_TREE_DRIVERS if spec.optional_record(key) is not None), None)
     tiers = set(_texts(csi, "volumeAttributes").values())
     affinity = spec.optional_record("nodeAffinity")
     return PersistentVolume(
         name=metadata.text("name"),
-        driver=next(in_tree, None) if csi is None else csi.text("driver"),
+        driver=in_tree if csi is None else csi.text("driver"),
         # Two different tiers under the two keys name no one tier.
         tier=tiers.pop() if len(tiers) == 1 else None,
         node_affinity=_node_terms(None if affinity is None else affinity.optional_record("required")),
+        in_tree=csi is None and in_tree is not None,
     )
 
 

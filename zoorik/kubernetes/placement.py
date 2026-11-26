@@ -26,7 +26,7 @@ from zoorik.kubectl.objects import (
 )
 from zoorik.kubectl.objects import Pod as ApiPod
 from zoorik.kubectl.quantity import CPU
-from zoorik.kubernetes.model import MEMORY, PODS, Machine, Pod, Resources
+from zoorik.kubernetes.model import MEMORY, PODS, ClusterState, Machine, Pod, Resources
 
 HOSTNAME = "kubernetes.io/hostname"
 OS_LABEL = "kubernetes.io/os"
@@ -337,6 +337,18 @@ def pool_overhead(pods: Sequence[Pod]) -> Overhead:
     for request in statics.values():
         static_most = largest(static_most, request)
     return Overhead(added(total, static_most), frozenset(ports))
+
+
+def overheads(state: ClusterState) -> Dict[str, Overhead]:
+    """Give each pool's machine overhead; a pool added beside another runs that pool's DaemonSets."""
+    pods: Dict[str, List[Pod]] = {}
+    for pod in state.pods:
+        if pod.overhead:
+            pods.setdefault(pod.pool, []).append(pod)
+    return {
+        pool.id: pool_overhead(pods.get(pool.id if pool.split_from is None else pool.split_from, []))
+        for pool in state.pools
+    }
 
 
 def empty_room(machine: Machine, overhead: Overhead) -> Room:

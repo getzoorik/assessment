@@ -169,6 +169,7 @@ class InstanceType:
     # InstanceStorageInfo, for types with instance storage only.
     store_disks: int
     store_nvme: Optional[str]
+    # The network interfaces of its default network card, and the IPv4 addresses each takes.
     max_interfaces: int
     ipv4_per_interface: int
 
@@ -217,6 +218,7 @@ class PriceProduct:
 class SpotPrice:
     """One spot price of a machine type in one zone, and when it took effect."""
 
+    machine_type: str
     zone: str
     price: float
     stamp: str
@@ -389,14 +391,12 @@ class AwsCli:
             _product(Record(parse_json(item, "aws pricing get-products"), "a Price List product")) for item in listed
         ]
 
-    def spot_prices(self, region: str, machine_type: str, at: datetime) -> List[SpotPrice]:
-        """Read the Linux spot prices of a machine type in each zone of a region, in effect at the time given."""
+    def spot_prices(self, region: str, at: datetime) -> List[SpotPrice]:
+        """Read the Linux spot prices of every machine type in each zone of a region, in effect at the time given."""
         argv = [
             "aws",
             "ec2",
             "describe-spot-price-history",
-            "--instance-types",
-            machine_type,
             "--product-descriptions",
             SPOT_PRODUCT,
             "--start-time",
@@ -406,7 +406,12 @@ class AwsCli:
         ]
         history = Record(self._cli.read(argv), "aws ec2 describe-spot-price-history").records("SpotPriceHistory")
         return [
-            SpotPrice(entry.text("AvailabilityZone"), _decimal(entry, "SpotPrice"), entry.text("Timestamp"))
+            SpotPrice(
+                entry.text("InstanceType"),
+                entry.text("AvailabilityZone"),
+                _decimal(entry, "SpotPrice"),
+                entry.text("Timestamp"),
+            )
             for entry in history
         ]
 
@@ -496,6 +501,10 @@ def _instance_type(record: Record) -> InstanceType:
     optimized = ebs.optional_record("EbsOptimizedInfo")
     storage = record.optional_record("InstanceStorageInfo")
     network = record.record("NetworkInfo")
+    cards = {card.integer("NetworkCardIndex"): card for card in network.records("NetworkCards")}
+    default_card = cards.get(network.integer("DefaultNetworkCardIndex"))
+    if default_card is None:
+        raise UnexpectedResponse(f"unexpected answer: {record.text('InstanceType')} names no default network card")
     return InstanceType(
         name=record.text("InstanceType"),
         vcpus=record.record("VCpuInfo").integer("DefaultVCpus"),
@@ -510,7 +519,7 @@ def _instance_type(record: Record) -> InstanceType:
         baseline_mbps=None if optimized is None else optimized.number("BaselineThroughputInMBps"),
         store_disks=0 if storage is None else sum(disk.integer("Count") for disk in storage.records("Disks")),
         store_nvme=None if storage is None else storage.text("NvmeSupport"),
-        max_interfaces=network.integer("MaximumNetworkInterfaces"),
+        max_interfaces=default_card.integer("MaximumNetworkInterfaces"),
         ipv4_per_interface=network.integer("Ipv4AddressesPerInterface"),
     )
 

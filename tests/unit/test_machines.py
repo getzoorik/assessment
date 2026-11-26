@@ -141,13 +141,11 @@ def product(machine_type: str, *prices: str) -> str:
     )
 
 
-def spot_history(region: str, machine_type: str, entries: List[Dict[str, str]]) -> Call:
-    """Make the spot price history call of a machine type, at the run's start, and its answer."""
+def spot_history(region: str, entries: List[Dict[str, str]]) -> Call:
+    """Make a region's spot price history call, at the run's start, and its answer."""
     argv = aws(
         "ec2",
         "describe-spot-price-history",
-        "--instance-types",
-        machine_type,
         "--product-descriptions",
         "Linux/UNIX",
         "--start-time",
@@ -189,19 +187,29 @@ class AwsMachinePricesTest(CloudTestCase):
         self.assertEqual(len(self.runner.runs), 1)
 
     def test_the_spot_price_averages_each_zones_latest_price(self) -> None:
-        """Each zone's latest price counts once, whatever order the history comes in; the price is read once."""
+        """Each zone's latest price counts once, whatever order the history comes in; the region is read once."""
         entries = [
             {"AvailabilityZone": "eu-west-1a", "SpotPrice": "0.040000", "Timestamp": "2026-01-05T09:00:00+00:00"},
             {"AvailabilityZone": "eu-west-1b", "SpotPrice": "0.044000", "Timestamp": "2026-01-05T07:00:00+00:00"},
             {"AvailabilityZone": "eu-west-1a", "SpotPrice": "0.050000", "Timestamp": "2026-01-05T08:00:00+00:00"},
         ]
-        prices = self.prices([spot_history("eu-west-1", "m5.large", entries)])
+        entries = [{"InstanceType": "m5.large", **entry} for entry in entries]
+        entries.append(
+            {
+                "InstanceType": "m5.xlarge",
+                "AvailabilityZone": "eu-west-1a",
+                "SpotPrice": "0.090000",
+                "Timestamp": "2026-01-05T06:00:00+00:00",
+            }
+        )
+        prices = self.prices([spot_history("eu-west-1", entries)])
         self.assertAlmostEqual(prices.hourly("eu-west-1", "m5.large", Capacity.SPOT), 0.042, places=12)
         self.assertAlmostEqual(prices.hourly("eu-west-1", "m5.large", Capacity.SPOT), 0.042, places=12)
+        self.assertEqual(prices.hourly("eu-west-1", "m5.xlarge", Capacity.SPOT), 0.09)
         self.assertEqual(len(self.runner.runs), 1)
 
     def test_a_type_with_no_spot_price_is_not_found(self) -> None:
-        """A spot history with no entries raises PriceNotFound."""
-        prices = self.prices([spot_history("eu-west-2", "m5.large", [])])
+        """A type the region's spot history doesn't name raises PriceNotFound."""
+        prices = self.prices([spot_history("eu-west-2", [])])
         with self.assertRaisesRegex(PriceNotFound, r"^no spot price for m5.large in eu-west-2$"):
             prices.hourly("eu-west-2", "m5.large", Capacity.SPOT)

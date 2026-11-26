@@ -3,10 +3,11 @@
   "Cluster cluster-public (westeurope): 5 nodes, 12 pods"
  ],
  "result": {
-  "after": 438,
+  "after": 372,
   "clusters": [
    {
     "bare_pods": 0,
+    "cheaper_types": null,
     "cluster": {
      "account": "sub-one",
      "cloud": "azure",
@@ -15,9 +16,9 @@
     },
     "lines": [
      {
-      "after": 3,
+      "after": 0,
       "capacity": "regular",
-      "cost_after": 438,
+      "cost_after": 0,
       "cost_today": 730,
       "hourly": 0.2,
       "kind": "node pool",
@@ -25,6 +26,18 @@
       "note": "",
       "pool": "system",
       "today": 5
+     },
+     {
+      "after": 3,
+      "capacity": "regular",
+      "cost_after": 372,
+      "cost_today": 0,
+      "hourly": 0.17,
+      "kind": "node pool",
+      "machine_type": "Standard_F4s_v2",
+      "note": "",
+      "pool": "system",
+      "today": 0
      }
     ],
     "not_machines": 0,
@@ -40,6 +53,12 @@
       "before": 730,
       "name": "Spare machines",
       "row": "smaller pods and spare machines"
+     },
+     {
+      "after": 372,
+      "before": 438,
+      "name": "Cheaper machine types",
+      "row": "cheaper machine types"
      }
     ],
     "usage": null,
@@ -68,7 +87,7 @@
    }
   ],
   "not_assessed": [],
-  "saving": 292,
+  "saving": 358,
   "subscriptions": {
    "sub-one": "subscription-one"
   },

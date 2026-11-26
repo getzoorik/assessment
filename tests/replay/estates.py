@@ -1,8 +1,8 @@
 """Made-up estates for the whole command: what each signed-in cloud covers, and what both parts read in it.
 
 Each estate joins the Kubernetes and disk scenarios' answers under the scope reads that open a run, with the options
-zoorik assess is run with. The shared reads (an AWS region's clusters and instances) are answered once, as the run
-makes them once for both parts.
+zoorik assess is run with. The shared reads (an AWS region's clusters, instances and instance types, and an Azure
+region's Compute SKUs) are answered once, as the run makes them once for both parts.
 """
 
 from dataclasses import dataclass, replace
@@ -10,6 +10,9 @@ from typing import List, Optional, Sequence, Tuple
 
 from tests.replay.disks import (
     AWS_KERNEL,
+    D8S,
+    NITRO_TYPE,
+    XEN_TYPE,
     azure_inventory,
     cloudwatch,
     ebs_prices,
@@ -17,19 +20,23 @@ from tests.replay.disks import (
     guest_output,
     linux_vm,
     root_volume,
+    skus,
     ssm_online,
     ssm_read,
     types_call,
     volume,
 )
 from tests.replay.kubernetes import (
+    EC2_TYPES,
     PRIVATE,
+    VM_TYPES,
     aks_list,
     aks_list_refused,
     aks_private,
     aks_public,
     aks_record,
     eks_node_kinds,
+    instance_types,
 )
 from tests.replay.recording import Call, Fetch
 from tests.replay.scenarios import (
@@ -121,6 +128,12 @@ def disk_instance_reads() -> List[Call]:
     ]
 
 
+def answered_once(calls: Sequence[Call], shared: Sequence[Call]) -> List[Call]:
+    """Give calls with each shared call in place of the calls of its key: a read the run makes once for both parts."""
+    keys = {each.key for each in shared}
+    return [*(each for each in calls if each.key not in keys), *shared]
+
+
 def scenario(
     name: str,
     calls: Sequence[Call],
@@ -135,14 +148,15 @@ def scenario(
 def whole_estate(name: str = "whole-estate", options: Tuple[str, ...] = ()) -> Estate:
     """Make both clouds, read over the default window: two clusters and two VMs, a yes for each cloud's VMs.
 
-    Kubernetes: the public AKS cluster's $730 to $438 and the EKS cluster's $379 to $277, so $1,109 to $715, a saving
-    of $394. Disks: the Azure VM's $200 to $24 and the instance's $50 to $9, so $250 to $33, a saving of $217. Page 1:
-    $1,359 to $748, a saving of $611, 45% of the cost today.
+    Kubernetes: the public AKS cluster's $730 to $438, then $372, and the EKS cluster's $379 to $277, then $204: $1,109
+    to $576, a saving of $394 from smaller pods and spare machines and $139 from cheaper machine types. Disks: the Azure
+    VM's $200 to $24 and the instance's $50 to $9, so $250 to $33, a saving of $217. Page 1: $1,359 to $609, a saving
+    of $750, 55% of the cost today. Both parts read the region's VM sizes and instance types once.
     """
     clusters_azure = aks_public(FIVE_MINUTES)
     clusters_aws = eks_node_kinds(FIVE_MINUTES, [DISK_INSTANCE])
     disks_azure = linux_vm()
-    calls = [
+    reads = [
         *azure_signed_in(),
         *aws_signed_in(),
         *clusters_azure.calls,
@@ -150,6 +164,7 @@ def whole_estate(name: str = "whole-estate", options: Tuple[str, ...] = ()) -> E
         *disks_azure.calls,
         *disk_instance_reads(),
     ]
+    calls = answered_once(reads, [skus(*VM_TYPES, D8S), instance_types(*EC2_TYPES, NITRO_TYPE, XEN_TYPE)])
     fetches = (*clusters_azure.fetches, *disks_azure.fetches)
     run = scenario(name, calls, fetches, (True, True), ("az", "aws", "kubectl"))
     return Estate(run, options)

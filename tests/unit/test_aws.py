@@ -254,7 +254,10 @@ class Ec2Test(CloudTestCase):
         )
 
     def test_instance_types_and_their_zones_are_read_once_per_region(self) -> None:
-        """Each region's types are read once with their limits; the parts AWS gives for some types only may be None."""
+        """Each region's types are read once with their limits; the parts AWS gives for some types only may be None.
+
+        A type's network interfaces are those of its default network card.
+        """
         full = {
             "InstanceType": "m5d.large",
             "VCpuInfo": {"DefaultVCpus": 2},
@@ -269,7 +272,15 @@ class Ec2Test(CloudTestCase):
                 "EbsOptimizedInfo": {"BaselineIops": 3600, "BaselineThroughputInMBps": 81.25},
             },
             "InstanceStorageInfo": {"Disks": [{"Count": 1, "SizeInGB": 75}], "NvmeSupport": "required"},
-            "NetworkInfo": {"MaximumNetworkInterfaces": 3, "Ipv4AddressesPerInterface": 10},
+            "NetworkInfo": {
+                "MaximumNetworkInterfaces": 6,
+                "Ipv4AddressesPerInterface": 10,
+                "DefaultNetworkCardIndex": 1,
+                "NetworkCards": [
+                    {"NetworkCardIndex": 0, "MaximumNetworkInterfaces": 4},
+                    {"NetworkCardIndex": 1, "MaximumNetworkInterfaces": 3},
+                ],
+            },
         }
         small = {
             "InstanceType": "t3.micro",
@@ -278,7 +289,12 @@ class Ec2Test(CloudTestCase):
             "ProcessorInfo": {"SupportedArchitectures": ["x86_64"]},
             "BurstablePerformanceSupported": True,
             "EbsInfo": {"NvmeSupport": "required"},
-            "NetworkInfo": {"MaximumNetworkInterfaces": 2, "Ipv4AddressesPerInterface": 2},
+            "NetworkInfo": {
+                "MaximumNetworkInterfaces": 2,
+                "Ipv4AddressesPerInterface": 2,
+                "DefaultNetworkCardIndex": 0,
+                "NetworkCards": [{"NetworkCardIndex": 0, "MaximumNetworkInterfaces": 2}],
+            },
         }
         offerings = {
             "InstanceTypeOfferings": [
@@ -474,12 +490,10 @@ class MetricsAndPricesTest(CloudTestCase):
             AwsCli(host, StartedCommands()).price_products((("regionCode", "eu-west-1"),))
 
     def test_spot_prices_are_read_for_each_zone(self) -> None:
-        """Each entry gives its zone, its price and when it took effect."""
+        """One read gives the region's history: each entry's machine type, zone, price and when it took effect."""
         argv = aws(
             "ec2",
             "describe-spot-price-history",
-            "--instance-types",
-            "m5.large",
             "--product-descriptions",
             "Linux/UNIX",
             "--start-time",
@@ -487,12 +501,12 @@ class MetricsAndPricesTest(CloudTestCase):
             "--region",
             "eu-west-1",
         )
-        history = {"SpotPriceHistory": [{"AvailabilityZone": "eu-west-1a", "SpotPrice": "0.035", "Timestamp": "t1"}]}
-        host, _ = self.host([answer(argv, history)])
+        entry = {"InstanceType": "m5.large", "AvailabilityZone": "eu-west-1a", "SpotPrice": "0.035", "Timestamp": "t1"}
+        host, _ = self.host([answer(argv, {"SpotPriceHistory": [entry]})])
         at = datetime(2026, 1, 5, 9, 30, tzinfo=timezone.utc)
         self.assertEqual(
-            AwsCli(host, StartedCommands()).spot_prices("eu-west-1", "m5.large", at),
-            [SpotPrice("eu-west-1a", 0.035, "t1")],
+            AwsCli(host, StartedCommands()).spot_prices("eu-west-1", at),
+            [SpotPrice("m5.large", "eu-west-1a", 0.035, "t1")],
         )
 
     def test_every_call_names_its_region(self) -> None:

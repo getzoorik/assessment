@@ -70,6 +70,8 @@ class Pool:
     # An AKS pool in System mode, which keeps at least one machine.
     system: bool
     lines: Tuple[Line, ...]
+    # A pool a step adds beside another for a second machine type names that pool, whose DaemonSets it runs.
+    split_from: Optional[str] = None
 
     @property
     def priced(self) -> bool:
@@ -218,6 +220,8 @@ class ClusterResult:
     not_machines: int
     # Why the cluster's usage wasn't read, so its pods keep today's requests; None when it was.
     usage: Optional[str]
+    # Why cheaper machine types couldn't be counted on the cluster; None when they could, or no pool could change.
+    cheaper_types: Optional[str]
 
     @property
     def today(self) -> int:

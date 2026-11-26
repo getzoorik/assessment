@@ -386,10 +386,12 @@ class ReadTest(unittest.TestCase):
         self.assertEqual(
             self.read.volumes,
             (
-                PersistentVolume("pv-data-db-0", "disk.csi.azure.com", "Premium_LRS", (NodeSelectorTerm((zone,), ()),)),
-                PersistentVolume("pv-cache", "disk.csi.azure.com", "StandardSSD_LRS", None),
-                PersistentVolume("pv-legacy", "disk.csi.azure.com", None, None),
-                PersistentVolume("pv-share", None, None, None),
+                PersistentVolume(
+                    "pv-data-db-0", "disk.csi.azure.com", "Premium_LRS", (NodeSelectorTerm((zone,), ()),), False
+                ),
+                PersistentVolume("pv-cache", "disk.csi.azure.com", "StandardSSD_LRS", None, False),
+                PersistentVolume("pv-legacy", "disk.csi.azure.com", None, None, True),
+                PersistentVolume("pv-share", None, None, None, False),
             ),
         )
         self.assertEqual(

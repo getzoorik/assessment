@@ -3,10 +3,11 @@
   "Cluster cluster-eks (eu-west-1): 7 nodes, 7 pods"
  ],
  "result": {
-  "after": 277,
+  "after": 204,
   "clusters": [
    {
     "bare_pods": 0,
+    "cheaper_types": null,
     "cluster": {
      "account": "123456789012",
      "cloud": "aws",
@@ -27,9 +28,9 @@
       "today": 1
      },
      {
-      "after": 1,
+      "after": 0,
       "capacity": "regular",
-      "cost_after": 146,
+      "cost_after": 0,
       "cost_today": 146,
       "hourly": 0.2,
       "kind": "NodePool",
@@ -37,6 +38,18 @@
       "note": "",
       "pool": "burst",
       "today": 1
+     },
+     {
+      "after": 1,
+      "capacity": "regular",
+      "cost_after": 73,
+      "cost_today": 0,
+      "hourly": 0.1,
+      "kind": "NodePool",
+      "machine_type": "m6i.large",
+      "note": "",
+      "pool": "burst",
+      "today": 0
      },
      {
       "after": 1,
@@ -76,6 +89,12 @@
       "before": 379,
       "name": "Spare machines",
       "row": "smaller pods and spare machines"
+     },
+     {
+      "after": 204,
+      "before": 277,
+      "name": "Cheaper machine types",
+      "row": "cheaper machine types"
      }
     ],
     "usage": null,
@@ -124,7 +143,7 @@
    }
   ],
   "not_assessed": [],
-  "saving": 102,
+  "saving": 175,
   "subscriptions": {},
   "today": 379,
   "unread": []

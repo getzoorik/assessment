@@ -94,13 +94,32 @@ class KubernetesGoldenTest(unittest.TestCase):
 class WorkedFigureTest(unittest.TestCase):
     """The figure the plan works out by hand, on a cluster read with kubectl."""
 
-    def test_a_public_cluster_goes_from_730_to_438_split_134_and_158(self) -> None:
-        """Step 1 saves $0 and step 2 $292; A's share is $134 and B's $158, and the System pool keeps three."""
+    def test_a_public_cluster_goes_from_730_to_438_split_134_and_158_then_to_372(self) -> None:
+        """Step 1 saves $0, step 2 $292 split $134 and $158, and step 3 $66: the System pool's three on F4s v2."""
         cluster = only_cluster("aks-public")
         figures = [(step.name, step.before, step.after, step.saving) for step in cluster.steps]
-        self.assertEqual(figures, [("Smaller pods", 730, 730, 0), ("Spare machines", 730, 438, 292)])
-        self.assertEqual([(line.today, line.after) for line in cluster.lines], [(5, 3)])
+        self.assertEqual(
+            figures,
+            [
+                ("Smaller pods", 730, 730, 0),
+                ("Spare machines", 730, 438, 292),
+                ("Cheaper machine types", 438, 372, 66),
+            ],
+        )
+        lines = [(line.machine_type, line.today, line.after, line.cost_after) for line in cluster.lines]
+        self.assertEqual(lines, [("Standard_D4s_v5", 5, 0, 0), ("Standard_F4s_v2", 0, 3, 372)])
         self.assertEqual([(each.name, each.share) for each in cluster.workloads], [("a", 134), ("b", 158)])
+        self.assertIsNone(cluster.cheaper_types)
+
+    def test_nodes_off_the_reservation_rule_get_no_step_3_named(self) -> None:
+        """A cluster whose nodes show another reservation's allocatable memory saves nothing in step 3, and says why."""
+        for name in ("aks-private", "aks-authorized-ranges"):
+            with self.subTest(name):
+                cluster = only_cluster(name)
+                self.assertEqual(cluster.steps[-1].name, "Cheaper machine types")
+                self.assertEqual(cluster.steps[-1].saving, 0)
+                reason = "the allocatable memory of its Standard_D4s_v5 nodes doesn't follow the platform's reservation"
+                self.assertEqual(cluster.cheaper_types, reason)
 
 
 class ReadMethodTest(unittest.TestCase):
@@ -149,7 +168,10 @@ class NodeKindsTest(unittest.TestCase):
     """Each kind of EKS node is its own pool, priced as it is bought."""
 
     def test_each_kind_is_a_pool_and_fargate_is_not_a_machine(self) -> None:
-        """Spot lines take the zones' average spot price; each node group drops a machine, the others keep theirs."""
+        """Spot lines take the zones' average spot price; each node group drops a machine, and burst moves to m6i.large.
+
+        The spot pools stay on m6i.large, the cheapest type that holds their pods at spot prices too.
+        """
         cluster = only_cluster("eks-node-kinds")
         lines = [
             (line.kind, line.pool, line.machine_type, line.capacity, line.hourly, line.today, line.after)
@@ -159,11 +181,14 @@ class NodeKindsTest(unittest.TestCase):
             lines,
             [
                 ("Auto Scaling group", "workers-self", "m6i.large", "spot", 0.04, 1, 1),
-                ("NodePool", "burst", "m6i.xlarge", "regular", 0.2, 1, 1),
+                ("NodePool", "burst", "m6i.xlarge", "regular", 0.2, 1, 0),
+                ("NodePool", "burst", "m6i.large", "regular", 0.1, 0, 1),
                 ("node group", "apps-on-demand", "m6i.large", "regular", 0.1, 2, 1),
                 ("node group", "apps-spot", "m6i.large", "spot", 0.04, 2, 1),
             ],
         )
-        self.assertEqual((cluster.today, cluster.after, cluster.not_machines), (379, 277, 1))
+        figures = [(step.name, step.before, step.after) for step in cluster.steps]
+        self.assertEqual(figures[-1], ("Cheaper machine types", 277, 204))
+        self.assertEqual((cluster.today, cluster.after, cluster.not_machines), (379, 204, 1))
         shares = {each.name: each.share for each in cluster.workloads}
         self.assertEqual(shares, {"report": 0, "tools": 0, "web": 62, "worker": 40})

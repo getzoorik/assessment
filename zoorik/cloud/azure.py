@@ -250,8 +250,8 @@ class ComputeSku:
     zones: FrozenSet[str]
     # False when the subscription may not use it anywhere in the region.
     offered: bool
-    # UltraSSDAvailable, in the region or in one of its zones.
-    ultra_ssd: bool
+    # The zones that offer it with Ultra Disk (UltraSSDAvailable in its zone details).
+    ultra_ssd_zones: FrozenSet[str]
 
     @property
     def vcpus(self) -> Optional[int]:
@@ -305,6 +305,11 @@ class ComputeSku:
     def burstable(self) -> bool:
         """Tell whether the size is burstable (the B-series)."""
         return self.family is not None and self.family.lower().startswith(BURSTABLE_FAMILY)
+
+    @property
+    def ultra_ssd(self) -> bool:
+        """Tell whether the size takes Ultra Disk in the region outside its zones (UltraSSDAvailable of the size)."""
+        return self._flag("UltraSSDAvailable") is True
 
     def _integer(self, name: str) -> Optional[int]:
         """Read a whole-number capability; None when the SKU doesn't list it."""
@@ -616,23 +621,25 @@ def _capabilities(records: Sequence[Record]) -> Dict[str, str]:
     return {capability.text("name"): capability.text("value") for capability in records}
 
 
-def _ultra_ssd_in_a_zone(info: Record) -> bool:
-    """Tell whether one of a SKU's zones offers Ultra Disk; zoneDetails lists only zones with such extras."""
+def _ultra_ssd_zones(info: Record) -> Set[str]:
+    """Give the zones of one location that offer Ultra Disk with a SKU; zoneDetails lists only zones with extras."""
+    zones: Set[str] = set()
     details = info.optional_records("zoneDetails")
-    return details is not None and any(
-        _capabilities(detail.records("capabilities")).get("UltraSSDAvailable") == "True" for detail in details
-    )
+    for detail in () if details is None else details:
+        if _capabilities(detail.records("capabilities")).get("UltraSSDAvailable") == "True":
+            zones.update(detail.texts("Name"))
+    return zones
 
 
 def _sku(item: Record) -> ComputeSku:
     """Read one Compute SKU: its capabilities, and the zones and region it is offered in to the subscription."""
     zones: Set[str] = set()
-    ultra_ssd = False
+    ultra_zones: Set[str] = set()
     for info in item.records("locationInfo"):
         listed = info.optional_texts("zones")
         if listed is not None:
             zones.update(listed)
-        ultra_ssd = ultra_ssd or _ultra_ssd_in_a_zone(info)
+        ultra_zones |= _ultra_ssd_zones(info)
     offered = True
     for restriction in item.records("restrictions"):
         kind = restriction.text("type")
@@ -648,5 +655,5 @@ def _sku(item: Record) -> ComputeSku:
         capabilities=capabilities,
         zones=frozenset(zones),
         offered=offered,
-        ultra_ssd=ultra_ssd or capabilities.get("UltraSSDAvailable") == "True",
+        ultra_ssd_zones=frozenset(ultra_zones),
     )

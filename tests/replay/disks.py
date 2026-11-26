@@ -360,7 +360,12 @@ def instance_type(name: str, nvme: str, baseline_iops: int, baseline_mbps: float
         "ProcessorInfo": {"SupportedArchitectures": ["x86_64"]},
         "BurstablePerformanceSupported": False,
         "EbsInfo": ebs,
-        "NetworkInfo": {"MaximumNetworkInterfaces": 4, "Ipv4AddressesPerInterface": 15},
+        "NetworkInfo": {
+            "MaximumNetworkInterfaces": 4,
+            "Ipv4AddressesPerInterface": 15,
+            "DefaultNetworkCardIndex": 0,
+            "NetworkCards": [{"NetworkCardIndex": 0, "MaximumNetworkInterfaces": 4}],
+        },
     }
 
 

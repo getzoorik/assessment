@@ -110,8 +110,9 @@ class FitAndPinningTest(unittest.TestCase):
     def test_an_attach_limit_keeps_a_machine(self) -> None:
         """Each machine attaches one disk, so the two pods with a disk each stay on two machines."""
         machines = [machine(name, attach={"disk.csi.azure.com": 1}) for name in ("m1", "m2")]
+        disk = "disk.csi.azure.com"
         pods = [
-            placed(api_pod(name), node, volumes=(PersistentVolume(f"pv-{name}", "disk.csi.azure.com", None, None),))
+            placed(api_pod(name), node, volumes=(PersistentVolume(f"pv-{name}", disk, None, None, False),))
             for name, node in (("db-1", "m1"), ("db-2", "m2"))
         ]
         today = state([pool()], machines, pods)

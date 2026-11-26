@@ -13,12 +13,14 @@ from zoorik.disks.model import AzureLimits, DataDisk, EbsLimits, Vm
 
 def size(capabilities: Mapping[str, str]) -> ComputeSku:
     """Make the Compute SKU of the VM size Standard_D8s_v5, with its capabilities."""
-    return ComputeSku("virtualMachines", "Standard_D8s_v5", None, capabilities, frozenset(("1", "2", "3")), True, False)
+    return ComputeSku(
+        "virtualMachines", "Standard_D8s_v5", None, capabilities, frozenset(("1", "2", "3")), True, frozenset()
+    )
 
 
 def premium_v2(zones: Tuple[str, ...] = ("1", "2", "3"), offered: bool = True) -> ComputeSku:
     """Make the Compute SKU of Premium SSD v2, offered in zones, or in none of the region where offered is False."""
-    return ComputeSku("disks", "PremiumV2_LRS", None, {}, frozenset(zones), offered, False)
+    return ComputeSku("disks", "PremiumV2_LRS", None, {}, frozenset(zones), offered, frozenset())
 
 
 D8S = size({"MaxDataDiskCount": "16", "UncachedDiskIOPS": "12800", "UncachedDiskBytesPerSecond": "290000000"})

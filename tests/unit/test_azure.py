@@ -508,7 +508,7 @@ class ComputeSkusTest(CloudTestCase):
                 {
                     "location": "westeurope",
                     "zones": ["1", "2", "3"],
-                    "zoneDetails": [{"name": ["2"], "capabilities": [{"name": "UltraSSDAvailable", "value": "True"}]}],
+                    "zoneDetails": [{"Name": ["2"], "capabilities": [{"name": "UltraSSDAvailable", "value": "True"}]}],
                 }
             ],
             restrictions=[{"type": "Zone", "restrictionInfo": {"zones": ["3"], "locations": ["westeurope"]}}],
@@ -541,7 +541,8 @@ class ComputeSkusTest(CloudTestCase):
             (4, 16.0, "x64", True, 8),
         )
         self.assertEqual((size.uncached_iops, size.uncached_mbps, size.gpus, size.burstable), (6400, 145, 0, False))
-        self.assertEqual((size.zones, size.offered, size.ultra_ssd), (frozenset({"1", "2"}), True, True))
+        self.assertEqual((size.zones, size.offered), (frozenset({"1", "2"}), True))
+        self.assertEqual((size.ultra_ssd_zones, size.ultra_ssd), ({"2"}, False))
         small = skus.vm_sizes["standard_b2s"]
         self.assertEqual((small.zones, small.offered, small.burstable, small.vcpus), (frozenset(), False, True, None))
         self.assertEqual(skus.vm_sizes["standard_nc6s_v3"].gpus, 1)

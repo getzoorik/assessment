@@ -28,6 +28,7 @@ from tests.replay.clusters import (
     small_objects,
     top,
 )
+from tests.replay.disks import skus
 from tests.replay.recording import TEMP, Body, Call, Failure, Fetch
 from tests.replay.scenarios import (
     ACCOUNT,
@@ -56,12 +57,22 @@ from zoorik.pricing.retail import RETAIL_PRICES_URL
 WINDOW = SampleWindow(0)
 VERSION = "1.30.4"
 D4S = "Standard_D4s_v5"
+F4S = "Standard_F4s_v2"
 TYPE_LABEL = "node.kubernetes.io/instance-type"
-# The room each EKS machine type gives pods.
-ALLOCATABLE = {
-    "m6i.large": {"cpu": "2", "memory": "8Gi", "pods": "29"},
-    "m6i.xlarge": {"cpu": "4", "memory": "16Gi", "pods": "58"},
+# What a node of each EKS machine type reports: its capacity, and what EKS's reservation for the VPC CNI's max pods
+# (29 and 58) and the eviction threshold leave allocatable.
+EKS_NODES = {
+    "m6i.large": (
+        {"cpu": "2", "memory": "7910580Ki", "pods": "29"},
+        {"cpu": "1930m", "memory": "7220404Ki", "pods": "29"},
+    ),
+    "m6i.xlarge": (
+        {"cpu": "4", "memory": "15821160Ki", "pods": "58"},
+        {"cpu": "3920m", "memory": "14804328Ki", "pods": "58"},
+    ),
 }
+EKS_KUBELET = "v1.30.4-eks-a737599"
+EKS_ZONES = ("eu-west-1a", "eu-west-1b", "eu-west-1c")
 PRIVATE = {"enablePrivateCluster": True}
 RANGES = {"enablePrivateCluster": False, "authorizedIpRanges": ["203.0.113.0/24"]}
 REFUSED_AZURE = (
@@ -141,11 +152,11 @@ def credentials(name: str) -> Call:
     return call(["az", *args, "--file", path, "--overwrite-existing", *AZURE.output])
 
 
-def machine_item(meter: str, price: float) -> Json:
-    """Make one retail price of a D4s v5 machine in the region, per hour."""
+def machine_item(sku: str, product: str, meter: str, price: float) -> Json:
+    """Make one retail price of a machine type in the region, per hour."""
     return {
-        "armSkuName": D4S,
-        "productName": "Virtual Machines Dsv5 Series",
+        "armSkuName": sku,
+        "productName": product,
         "meterName": meter,
         "unitOfMeasure": "1 Hour",
         "unitPrice": price,
@@ -153,21 +164,82 @@ def machine_item(meter: str, price: float) -> Json:
     }
 
 
-MACHINE_QUERY = (
-    f"armRegionName eq '{REGION}' and serviceName eq 'Virtual Machines' and priceType eq 'Consumption' "
-    f"and (armSkuName eq '{D4S}')"
+def machine_prices(*items: Json) -> Fetch:
+    """Make the region's retail prices fetch of the machine types items price, named in the query in sorted order."""
+    names = " or ".join(f"armSkuName eq '{sku}'" for sku in sorted({str(item["armSkuName"]) for item in items}))
+    query = (
+        f"armRegionName eq '{REGION}' and serviceName eq 'Virtual Machines' and priceType eq 'Consumption' "
+        f"and ({names})"
+    )
+    url = RETAIL_PRICES_URL + "?" + urllib.parse.urlencode({"$filter": query})
+    return Fetch(url, Body({"Items": list(items), "NextPageLink": None}))
+
+
+# A D4s v5 machine costs $0.20 an hour, or $0.04 on spot; an F4s v2 costs $0.17.
+D4S_ITEMS = (
+    machine_item(D4S, "Virtual Machines Dsv5 Series", "D4s v5", 0.2),
+    machine_item(D4S, "Virtual Machines Dsv5 Series", "D4s v5 Spot", 0.04),
 )
-# A D4s v5 machine costs $0.20 an hour, or $0.04 on spot.
-MACHINE_PRICES = Fetch(
-    RETAIL_PRICES_URL + "?" + urllib.parse.urlencode({"$filter": MACHINE_QUERY}),
-    Body({"Items": [machine_item("D4s v5", 0.2), machine_item("D4s v5 Spot", 0.04)], "NextPageLink": None}),
+MACHINE_PRICES = machine_prices(*D4S_ITEMS)
+CANDIDATE_PRICES = machine_prices(*D4S_ITEMS, machine_item(F4S, "Virtual Machines FSv2 Series", "F4s v2", 0.17))
+
+
+def vm_type(
+    name: str,
+    family: str,
+    capabilities: Mapping[str, str],
+    zones: Sequence[str] = ("1", "2", "3"),
+    restrictions: Sequence[Json] = (),
+) -> Json:
+    """Make a VM size's Compute SKU item: its family and capabilities, its zones, and its restrictions."""
+    return {
+        "resourceType": "virtualMachines",
+        "name": name,
+        "tier": "Standard",
+        "family": family,
+        "locations": [REGION],
+        "locationInfo": [{"location": REGION, "zones": list(zones), "zoneDetails": []}],
+        "capabilities": [{"name": key, "value": value} for key, value in capabilities.items()],
+        "restrictions": list(restrictions),
+    }
+
+
+def sized(vcpus: int, memory_gb: int, architecture: str = "x64") -> Dict[str, str]:
+    """Give a VM size's capabilities: its vCPUs, memory and architecture, with premium disks and 8 data disks."""
+    return {
+        "vCPUs": str(vcpus),
+        "MemoryGB": str(memory_gb),
+        "CpuArchitectureType": architecture,
+        "PremiumIO": "True",
+        "MaxDataDiskCount": "8",
+    }
+
+
+NOT_FOR_SUBSCRIPTION = {
+    "type": "Location",
+    "values": [REGION],
+    "restrictionInfo": {"locations": [REGION]},
+    "reasonCode": "NotAvailableForSubscription",
+}
+# The region's VM sizes. Step 3 may move a pool to D4s v5 or F4s v2. The others are left out: B4ms bursts, D4ps v5 is
+# Arm64, NC4as T4 v3 has a GPU, A1 v2 is below AKS's minimum, E4s v5 is not offered in zone 1, and the subscription may
+# not use D4as v5.
+VM_TYPES = (
+    vm_type(D4S, "standardDSv5Family", sized(4, 16)),
+    vm_type(F4S, "standardFSv2Family", sized(4, 8)),
+    vm_type("Standard_B4ms", "standardBSFamily", sized(4, 16)),
+    vm_type("Standard_D4ps_v5", "standardDPSv5Family", sized(4, 16, "Arm64")),
+    vm_type("Standard_NC4as_T4_v3", "standardNCASv3_T4Family", {**sized(4, 28), "GPUs": "1"}),
+    vm_type("Standard_A1_v2", "standardAv2Family", {**sized(1, 2), "PremiumIO": "False", "MaxDataDiskCount": "2"}),
+    vm_type("Standard_E4s_v5", "standardESv5Family", sized(4, 32), zones=("2", "3")),
+    vm_type("Standard_D4as_v5", "standardDASv5Family", sized(4, 16), restrictions=[NOT_FOR_SUBSCRIPTION]),
 )
 
 
 def aks_node(name: str) -> Json:
-    """Make a D4s v5 node of the System pool in zone 1, with 4 cores, 16 GiB and 110 pod slots for pods."""
+    """Make a D4s v5 node of the System pool in zone 1, with what AKS's reservation for 110 pods leaves allocatable."""
     record = node(name, "westeurope-1")
-    record["status"]["allocatable"] = {"cpu": "4", "memory": "16Gi", "pods": "110"}
+    record["status"]["allocatable"]["memory"] = "13986964Ki"
     return record
 
 
@@ -218,11 +290,15 @@ def azure_scenario(name: str, calls: Sequence[Call], fetches: Sequence[Fetch] = 
 
 
 def invoked(scenario: str, name: str, access: Mapping[str, object]) -> KubernetesScenario:
-    """Make a scenario whose one cluster, with access settings that need command invoke, is read through it."""
+    """Make a scenario whose one cluster, with access settings that need command invoke, is read through it.
+
+    Its nodes run 1.30.4 but show the allocatable memory of AKS's reservation before 1.29, so step 3 is not counted.
+    """
     logs = invoke_logs(invoke_text(Cluster(small_objects(), SAMPLES[:1])))
     calls = [
         aks_list(aks_record(name, apiServerAccessProfile=access)),
         invoke_call(WINDOW, logs, replace(AKS, name=name)),
+        skus(*VM_TYPES),
     ]
     return azure_scenario(scenario, calls, (MACHINE_PRICES,))
 
@@ -231,17 +307,20 @@ def invoked(scenario: str, name: str, access: Mapping[str, object]) -> Kubernete
 
 
 def aks_public(window: SampleWindow = WINDOW, others: Sequence[Json] = ()) -> KubernetesScenario:
-    """Read a public cluster with kubectl over window: the worked figure, $730 a month to $438, a saving of $292.
+    """Read a public cluster with kubectl over window: the worked figure, $730 a month to $438, then $372.
 
     Each pod asks 910m and 1300 MiB after step 1, so four fit a machine and the twelve need three; the System pool keeps
     three of its five machines, below its autoscaler's minimum of five. A frees 2000m and 4096 MiB and B 1000m and
-    12288 MiB, so A's share is $134 and B's $158. The subscription's other clusters are others.
+    12288 MiB, so A's share is $134 and B's $158. Step 3: an F4s v2 gives pods 3860m and 5857 MiB, so four fit one
+    and the twelve need three F4s v2 at $0.17 an hour: $372, a saving of $66. The subscription's other clusters are
+    others.
     """
     name = "cluster-public"
     pools = [agent_pool("system", "System", 5)]
     record = aks_record(name, agentPoolProfiles=pools, apiServerAccessProfile={"enablePrivateCluster": False})
     reads = direct_calls(worked_figure(window), kubeconfig=kubeconfig("aks", SUB, GROUP, name))
-    return azure_scenario("aks-public", [aks_list(record, *others), credentials(name), *reads], (MACHINE_PRICES,))
+    calls = [aks_list(record, *others), credentials(name), *reads, skus(*VM_TYPES)]
+    return azure_scenario("aks-public", calls, (CANDIDATE_PRICES,))
 
 
 def aks_private() -> KubernetesScenario:
@@ -327,7 +406,7 @@ def unreachable(cluster: str) -> Call:
 
 
 def eks_node(name: str, zone: str, provider: str, labels: Mapping[str, str]) -> Json:
-    """Make an EKS node in zone with its provider id and labels; a node with a machine type has that type's room."""
+    """Make an EKS node in zone with its provider id and labels; a node with a machine type reports that type's room."""
     record = node(name, zone)
     record["metadata"]["labels"] = {
         "kubernetes.io/hostname": name,
@@ -338,7 +417,10 @@ def eks_node(name: str, zone: str, provider: str, labels: Mapping[str, str]) -> 
     }
     record["spec"] = {"providerID": provider}
     if TYPE_LABEL in labels:
-        record["status"]["allocatable"] = ALLOCATABLE[labels[TYPE_LABEL]]
+        capacity, allocatable = EKS_NODES[labels[TYPE_LABEL]]
+        record["status"]["capacity"].update(capacity)
+        record["status"]["allocatable"].update(allocatable)
+        record["status"]["nodeInfo"]["kubeletVersion"] = EKS_KUBELET
     return record
 
 
@@ -411,22 +493,77 @@ def product(machine_type: str, price: str) -> str:
     return json.dumps({"product": {"attributes": {"instanceType": machine_type, "regionCode": EU}}, "terms": terms})
 
 
-def spot_price(zone: str, price: str) -> Json:
-    """Make one entry of m6i.large's spot price history, at the start of the run's hour."""
+def spot_price(machine_type: str, zone: str, price: str) -> Json:
+    """Make one entry of the region's spot price history, at the start of the run's hour."""
     return {
         "AvailabilityZone": zone,
-        "InstanceType": "m6i.large",
+        "InstanceType": machine_type,
         "ProductDescription": "Linux/UNIX",
         "SpotPrice": price,
         "Timestamp": "2026-01-05T09:00:00+00:00",
     }
 
 
+def ec2_type(name: str, size: Tuple[int, int], network: Tuple[int, int], **fields: object) -> Json:
+    """Make an x86_64 Nitro instance type as describe-instance-types gives it, with fields added or replaced.
+
+    size is its vCPUs and MiB; network is its default card's interfaces and the IPv4 addresses each takes.
+    """
+    vcpus, memory = size
+    interfaces, addresses = network
+    record: Json = {
+        "InstanceType": name,
+        "VCpuInfo": {"DefaultVCpus": vcpus},
+        "MemoryInfo": {"SizeInMiB": memory},
+        "ProcessorInfo": {"SupportedArchitectures": ["x86_64"]},
+        "BurstablePerformanceSupported": False,
+        "EbsInfo": {"NvmeSupport": "required", "MaximumEbsAttachments": 28, "AttachmentLimitType": "shared"},
+        "NetworkInfo": {
+            "MaximumNetworkInterfaces": interfaces,
+            "Ipv4AddressesPerInterface": addresses,
+            "DefaultNetworkCardIndex": 0,
+            "NetworkCards": [{"NetworkCardIndex": 0, "MaximumNetworkInterfaces": interfaces}],
+        },
+    }
+    record.update(fields)
+    return record
+
+
+# The region's instance types. Step 3 may move a pool to m6i.large or m6i.xlarge, whose VPC CNI max pods are 29 and
+# 58. The others are left out: t3.large bursts, m7g.large is arm64, g4dn.xlarge has a GPU, and r6i.large is offered
+# only in eu-west-1c, where no pool runs.
+EC2_TYPES = (
+    ec2_type("m6i.large", (2, 8192), (3, 10)),
+    ec2_type("m6i.xlarge", (4, 16384), (4, 15)),
+    ec2_type("t3.large", (2, 8192), (3, 12), BurstablePerformanceSupported=True),
+    ec2_type("m7g.large", (2, 8192), (3, 10), ProcessorInfo={"SupportedArchitectures": ["arm64"]}),
+    ec2_type("g4dn.xlarge", (4, 16384), (3, 10), GpuInfo={"Gpus": [{"Name": "T4", "Count": 1}]}),
+    ec2_type("r6i.large", (2, 16384), (3, 10)),
+)
+
+
+def instance_types(*kinds: Json) -> Call:
+    """Make the region's describe-instance-types answer."""
+    return aws_call(["ec2", "describe-instance-types", "--region", EU], {"InstanceTypes": list(kinds)})
+
+
+def type_offerings() -> Call:
+    """Make the zones that offer each of EC2_TYPES: every zone of the region, but r6i.large only eu-west-1c."""
+    offers = [
+        {"InstanceType": kind["InstanceType"], "LocationType": "availability-zone", "Location": zone}
+        for kind in EC2_TYPES
+        for zone in EKS_ZONES
+        if kind["InstanceType"] != "r6i.large" or zone == "eu-west-1c"
+    ]
+    args = ["ec2", "describe-instance-type-offerings", "--location-type", "availability-zone", "--region", EU]
+    return aws_call(args, {"InstanceTypeOfferings": offers})
+
+
 def ec2_prices() -> List[Call]:
-    """Make the region's on-demand Price List and m6i.large's spot price history.
+    """Make the region's on-demand Price List and its spot price history.
 
     m6i.large costs $0.10 an hour and m6i.xlarge $0.20. m6i.large's latest spot price is 0.03 in one zone and 0.05 in
-    the other: $0.04 on average.
+    the other, $0.04 on average; m6i.xlarge's is 0.07 and 0.09, $0.08.
     """
     terms = [
         ("regionCode", EU),
@@ -439,9 +576,14 @@ def ec2_prices() -> List[Call]:
     filters = json.dumps([{"Type": "TERM_MATCH", "Field": field, "Value": value} for field, value in terms])
     listed = ["pricing", "get-products", "--service-code", "AmazonEC2", "--format-version", "aws_v1"]
     products = [product("m6i.large", "0.1000000000"), product("m6i.xlarge", "0.2000000000")]
-    spot = ["describe-spot-price-history", "--instance-types", "m6i.large", "--product-descriptions", "Linux/UNIX"]
+    spot = ["describe-spot-price-history", "--product-descriptions", "Linux/UNIX"]
     at = ["--start-time", "2026-01-05T09:30:00Z", "--region", EU]
-    history = [spot_price("eu-west-1a", "0.030000"), spot_price("eu-west-1b", "0.050000")]
+    history = [
+        spot_price("m6i.large", "eu-west-1a", "0.030000"),
+        spot_price("m6i.large", "eu-west-1b", "0.050000"),
+        spot_price("m6i.xlarge", "eu-west-1a", "0.070000"),
+        spot_price("m6i.xlarge", "eu-west-1b", "0.090000"),
+    ]
     return [
         aws_call([*listed, "--filters", filters, "--region", US], {"PriceList": products}),
         aws_call(["ec2", *spot, *at], {"SpotPriceHistory": history}),
@@ -460,9 +602,12 @@ def eks_node_kinds(window: SampleWindow = WINDOW, others: Sequence[Json] = ()) -
     """Read an EKS cluster with kubectl: managed on-demand and spot groups, a self-managed group, Karpenter and Fargate.
 
     Each kind of node is its own pool, priced as it is bought. web's and worker's pods each fit one machine of their
-    group after step 1, so each group drops one: $73 and $29 a month, so $379 goes to $277. The Fargate node is counted,
-    and its pod left out. Only the self-managed node carries no provisioner's label, so the region's instances are read
-    for it: it is spot, in the Auto Scaling group workers-self. The region's other instances are others.
+    group after step 1, so each group drops one: $73 and $29 a month, so $379 goes to $277. Step 3 moves burst from an
+    m6i.xlarge to an m6i.large, which gives report's pod of 1 core and 2 GiB room enough, 1930m and 7051 MiB: $146 to
+    $73, so $277 goes to $204. Each other pool is on the cheapest type that holds its pods; the spot pools compare
+    candidates at spot prices. The Fargate node is counted, and its pod left out. Only the self-managed node carries no
+    provisioner's label, so the region's instances are read for it: it is spot, in the Auto Scaling group workers-self.
+    The region's other instances are others.
     """
     name = "cluster-eks"
     worker = {
@@ -476,6 +621,8 @@ def eks_node_kinds(window: SampleWindow = WINDOW, others: Sequence[Json] = ()) -
         update_kubeconfig(name),
         *direct_calls(node_kinds(window), kubeconfig=kubeconfig("eks", EU, name)),
         aws_call(instances_args(EU), {"Reservations": [{"ReservationId": "r-01", "Instances": [worker, *others]}]}),
+        instance_types(*EC2_TYPES),
+        type_offerings(),
         *ec2_prices(),
     ]
     return aws_scenario("eks-node-kinds", calls)

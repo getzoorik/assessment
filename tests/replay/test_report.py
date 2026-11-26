@@ -21,11 +21,11 @@ class PageOneTest(unittest.TestCase):
     """summary and saved_by, on the parts' results for made-up estates."""
 
     def test_today_is_the_machines_of_the_clusters_plus_the_disks(self) -> None:
-        """The cost today is the Kubernetes total plus DisksResult.today: $730 + $200, and $438 + $24 after."""
+        """The cost today is the Kubernetes total plus DisksResult.today: $730 + $200, and $372 + $24 after."""
         clusters, disks = clusters_of("aks-public"), disks_of("linux-vm")
         figures = summary(clusters, disks)
         self.assertEqual((figures.today, figures.after), (clusters.today + disks.today, clusters.after + disks.after))
-        self.assertEqual((figures.today, figures.after, figures.saving, figures.share), (930, 462, 468, 50))
+        self.assertEqual((figures.today, figures.after, figures.saving, figures.share), (930, 396, 534, 57))
 
     def test_the_rows_add_up_to_the_saving(self) -> None:
         """Each row the steps count in, then disks: together exactly the saving."""
@@ -48,10 +48,10 @@ class PageOneTest(unittest.TestCase):
         self.assertEqual(Summary(8, 7, (Row(DISKS_ROW, 1),)).share, 13)
 
     def test_the_headline_names_only_the_rows_that_saved_something(self) -> None:
-        """A private cluster that saves nothing beside a VM that saves: disks alone; both saving: both."""
+        """A private cluster that saves nothing beside a VM that saves: disks alone; with the public one: all three."""
         self.assertEqual(saved_by(summary(clusters_of("aks-private"), disks_of("linux-vm")).rows), "disks")
-        both = saved_by(summary(clusters_of("aks-public"), disks_of("linux-vm")).rows)
-        self.assertEqual(both, "smaller pods and spare machines, and disks")
+        every = saved_by(summary(clusters_of("aks-public"), disks_of("linux-vm")).rows)
+        self.assertEqual(every, "smaller pods and spare machines, cheaper machine types, and disks")
 
 
 class KubernetesRowsTest(unittest.TestCase):

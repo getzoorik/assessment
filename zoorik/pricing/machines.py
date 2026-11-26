@@ -1,7 +1,7 @@
 """Machine list prices per hour: Azure's retail prices, and AWS's Price List and spot price history.
 
 The rule for every machine type is the lowest positive price the price list gives it. A spot price on AWS is the
-average, over the region's zones, of each zone's latest price.
+average, over the region's zones, of each zone's latest price; the region's spot price history is read once.
 """
 
 import threading
@@ -122,14 +122,14 @@ class AzureMachinePrices:
 
 
 class AwsMachinePrices:
-    """AWS's machine prices: the region's on-demand Price List, read once, and each type's spot price history."""
+    """AWS's machine prices: the region's on-demand Price List and its spot price history, each read once."""
 
     def __init__(self, aws: AwsCli, clock: Clock) -> None:
         """Read prices through aws; spot prices are those in effect at clock's time."""
         self._aws = aws
         self._clock = clock
         self._regular: Memo[str, Dict[str, float]] = Memo(self._read_region)
-        self._spot: Memo[Tuple[str, str], float] = Memo(self._read_spot)
+        self._spot: Memo[str, Dict[str, float]] = Memo(self._read_spot)
 
     def read(self, region: str, machine_types: Collection[str]) -> None:
         """Read the region's on-demand price list, which holds every machine type; spot prices wait for hourly."""
@@ -137,9 +137,7 @@ class AwsMachinePrices:
 
     def hourly(self, region: str, machine_type: str, capacity: Capacity) -> float:
         """Give the machine type's lowest on-demand price, or its spot price."""
-        if capacity is Capacity.SPOT:
-            return self._spot.get((region, machine_type))
-        prices = self._regular.get(region)
+        prices = self._spot.get(region) if capacity is Capacity.SPOT else self._regular.get(region)
         if machine_type not in prices:
             raise missing(machine_type, region, capacity)
         return prices[machine_type]
@@ -153,12 +151,9 @@ class AwsMachinePrices:
                 found.setdefault(product.attribute("instanceType"), []).extend(positive)
         return {kind: min(prices) for kind, prices in found.items()}
 
-    def _read_spot(self, key: Tuple[str, str]) -> float:
-        """Read a machine type's spot price: the average over the region's zones of each zone's latest price."""
-        region, machine_type = key
-        latest: Dict[str, float] = {}
-        for entry in sorted(self._aws.spot_prices(region, machine_type, self._clock.now()), key=lambda e: e.stamp):
-            latest[entry.zone] = entry.price
-        if not latest:
-            raise missing(machine_type, region, Capacity.SPOT)
-        return sum(latest.values()) / len(latest)
+    def _read_spot(self, region: str) -> Dict[str, float]:
+        """Read each machine type's spot price: the average over the region's zones of each zone's latest price."""
+        latest: Dict[str, Dict[str, float]] = {}
+        for entry in sorted(self._aws.spot_prices(region, self._clock.now()), key=lambda each: each.stamp):
+            latest.setdefault(entry.machine_type, {})[entry.zone] = entry.price
+        return {kind: sum(zones.values()) / len(zones) for kind, zones in latest.items()}

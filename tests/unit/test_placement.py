@@ -117,10 +117,10 @@ class FitTest(unittest.TestCase):
     def test_attach_limits_count_each_volume_once(self) -> None:
         """A driver that attaches one volume takes a pod whose volume is already attached, and no other."""
         target = machine("m1", attach={"disk.csi.azure.com": 1})
-        shared = PersistentVolume("pv-one", "disk.csi.azure.com", None, None)
+        shared = PersistentVolume("pv-one", "disk.csi.azure.com", None, None, False)
         room = Room(dict(target.allocatable), set(), {"disk.csi.azure.com": {"pv-one"}})
         self.assertTrue(fits_machine(placed(api_pod("a"), "m1", volumes=(shared,)), target, room))
-        other = PersistentVolume("pv-two", "disk.csi.azure.com", None, None)
+        other = PersistentVolume("pv-two", "disk.csi.azure.com", None, None, False)
         self.assertFalse(fits_machine(placed(api_pod("b"), "m1", volumes=(other,)), target, room))
 
     def test_the_node_selector_must_match(self) -> None:
@@ -162,7 +162,7 @@ class FitTest(unittest.TestCase):
     def test_every_volume_must_reach_the_machine(self) -> None:
         """A volume bound to a zone keeps its pod in that zone."""
         zone = NodeSelectorTerm((Requirement(ZONE_LABEL, "In", ("zone-1",)),), ())
-        pod = placed(api_pod("a"), "m1", volumes=(PersistentVolume("pv", "disk.csi.azure.com", None, (zone,)),))
+        pod = placed(api_pod("a"), "m1", volumes=(PersistentVolume("pv", "disk.csi.azure.com", None, (zone,), False),))
         self.assertTrue(fits(pod, machine("m1", "zone-1")))
         self.assertFalse(fits(pod, machine("m2", "zone-2")))
 
@@ -320,6 +320,6 @@ class MachineTest(unittest.TestCase):
         """A local volume's required node affinity names the node's hostname; a zone doesn't bind it to one node."""
         local = NodeSelectorTerm((Requirement(HOSTNAME, "In", ("m1",)),), ())
         zone = NodeSelectorTerm((Requirement(ZONE_LABEL, "In", ("zone-1",)),), ())
-        self.assertTrue(bound_to_one_node(PersistentVolume("pv-a", None, None, (local,))))
-        self.assertFalse(bound_to_one_node(PersistentVolume("pv-b", "disk.csi.azure.com", None, (zone,))))
-        self.assertFalse(bound_to_one_node(PersistentVolume("pv-c", None, None, None)))
+        self.assertTrue(bound_to_one_node(PersistentVolume("pv-a", None, None, (local,), False)))
+        self.assertFalse(bound_to_one_node(PersistentVolume("pv-b", "disk.csi.azure.com", None, (zone,), False)))
+        self.assertFalse(bound_to_one_node(PersistentVolume("pv-c", None, None, None, False)))

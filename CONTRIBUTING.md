@@ -56,8 +56,9 @@ zoorik/
   pricing/         http.py (the one HTTP policy, the only user of urllib.request), retail.py (the Azure Retail
                    Prices API), machines.py, disks.py, azure_disks.py and aws_ebs.py
   kubernetes/      the Kubernetes part: discovery.py (which clusters, and how each is read), collect.py (pools,
-                   machines and pods), placement.py (where a pod may run), packing.py, shares.py, model.py,
-                   assessment.py and steps/ (the saving steps, in order)
+                   machines and pods), placement.py (where a pod may run), packing.py, catalogue.py (the machine
+                   types a region offers), allocatable.py (what a type the cluster doesn't run gives its pods),
+                   shares.py, model.py, assessment.py and steps/ (the saving steps, in order)
   disks/           the disk part: azure_inventory.py, aws_inventory.py, facts.py, metrics.py, guest.py (the read
                    inside a VM), pools.py, model.py and assessment.py
   report/          the PDF: pdf.py and blocks.py (the engine), summary.py (page 1), kubernetes_pages.py,
@@ -131,6 +132,7 @@ Each outside system is one protocol, with an Azure and an AWS implementation:
 | `ClusterSource`: the clusters, and how each is read | `zoorik/kubernetes/discovery.py` |
 | `KubeApi`: one cluster's objects and usage | `zoorik/kubectl/api.py` |
 | `MachinePrices`: a machine type's hourly list price | `zoorik/pricing/machines.py` |
+| `MachineCatalogue`: the machine types a region offers | `zoorik/kubernetes/catalogue.py` |
 | `VmInventory`: the VMs and their data disks | `zoorik/disks/assessment.py` |
 | `GuestReader`: the read inside a VM | `zoorik/disks/guest.py` |
 | `DiskMetrics`: a disk's busiest minute of each hour | `zoorik/disks/metrics.py` |
