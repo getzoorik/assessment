@@ -1,0 +1,54 @@
+{
+ "console": [
+  "Region us-east-1: clusters not listed, access denied",
+  "Cluster cluster-creating (eu-west-1): not assessed, the cluster's status is CREATING",
+  "Cluster cluster-groups (eu-west-1): not assessed, could not read its node groups: access denied",
+  "Cluster cluster-private (eu-west-1): not assessed, API server not reachable from here: its endpoint is private, so run this from inside its VPC",
+  "Cluster cluster-public (eu-west-1): not assessed, API server not reachable from here"
+ ],
+ "result": {
+  "after": 0,
+  "clusters": [],
+  "not_assessed": [
+   {
+    "account": "123456789012",
+    "cloud": "aws",
+    "name": "cluster-creating",
+    "reason": "the cluster's status is CREATING",
+    "region": "eu-west-1"
+   },
+   {
+    "account": "123456789012",
+    "cloud": "aws",
+    "name": "cluster-groups",
+    "reason": "could not read its node groups: access denied",
+    "region": "eu-west-1"
+   },
+   {
+    "account": "123456789012",
+    "cloud": "aws",
+    "name": "cluster-private",
+    "reason": "API server not reachable from here: its endpoint is private, so run this from inside its VPC",
+    "region": "eu-west-1"
+   },
+   {
+    "account": "123456789012",
+    "cloud": "aws",
+    "name": "cluster-public",
+    "reason": "API server not reachable from here",
+    "region": "eu-west-1"
+   }
+  ],
+  "saving": 0,
+  "subscriptions": {},
+  "today": 0,
+  "unread": [
+   {
+    "cloud": "aws",
+    "name": "us-east-1",
+    "reason": "access denied"
+   }
+  ]
+ },
+ "started": "Nothing in your cloud was changed."
+}

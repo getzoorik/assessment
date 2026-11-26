@@ -1,0 +1,18 @@
+{
+ "console": {
+  "Disks": [
+   "Subscription subscription-one: VMs not listed, Resource Graph: access denied"
+  ],
+  "Kubernetes": [
+   "Subscription subscription-one: clusters not listed, access denied"
+  ],
+  "run": [
+   "Zoorik cloud cost assessment <version>. It sends nothing to Zoorik; you send the report yourself.",
+   "Azure: Directory One (one.example.test), 1 enabled subscription",
+   "Nothing to report: the run found no cluster machine or VM data disk with a list price."
+  ]
+ },
+ "exit": 1,
+ "files": [],
+ "reports": {}
+}

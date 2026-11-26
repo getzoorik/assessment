@@ -1,0 +1,145 @@
+{
+ "console": [
+  "Cluster cluster-public (westeurope): 5 nodes, 12 pods"
+ ],
+ "result": {
+  "after": 248,
+  "clusters": [
+   {
+    "apps": [
+     {
+      "copies": 8,
+      "kind": "Deployment",
+      "name": "a",
+      "namespace": "shop",
+      "quiet": 2
+     },
+     {
+      "copies": 4,
+      "kind": "Deployment",
+      "name": "b",
+      "namespace": "shop",
+      "quiet": 2
+     }
+    ],
+    "bare_pods": 0,
+    "cheaper_types": null,
+    "cluster": {
+     "account": "sub-one",
+     "cloud": "azure",
+     "name": "cluster-public",
+     "region": "westeurope"
+    },
+    "fewer_copies": null,
+    "lines": [
+     {
+      "after": 0,
+      "capacity": "regular",
+      "cost_after": 0,
+      "cost_today": 730,
+      "hourly": 0.2,
+      "kind": "node pool",
+      "machine_type": "Standard_D4s_v5",
+      "note": "",
+      "pool": "system",
+      "quiet": 0,
+      "spot": null,
+      "spot_note": "",
+      "today": 5
+     },
+     {
+      "after": 3,
+      "capacity": "regular",
+      "cost_after": 248,
+      "cost_today": 0,
+      "hourly": 0.17,
+      "kind": "node pool",
+      "machine_type": "Standard_F4s_v2",
+      "note": "",
+      "pool": "system",
+      "quiet": 1,
+      "spot": null,
+      "spot_note": "",
+      "today": 0
+     }
+    ],
+    "not_machines": 0,
+    "steps": [
+     {
+      "after": 730,
+      "assumption": "",
+      "before": 730,
+      "name": "Smaller pods",
+      "row": "smaller pods and spare machines (packing included)"
+     },
+     {
+      "after": 438,
+      "assumption": "",
+      "before": 730,
+      "name": "Spare machines",
+      "row": "smaller pods and spare machines (packing included)"
+     },
+     {
+      "after": 372,
+      "assumption": "",
+      "before": 438,
+      "name": "Cheaper machine types",
+      "row": "cheaper machine types"
+     },
+     {
+      "after": 372,
+      "assumption": "",
+      "before": 372,
+      "name": "Packing across pools",
+      "row": "smaller pods and spare machines (packing included)"
+     },
+     {
+      "after": 248,
+      "assumption": "each app with 3 or more copies and no autoscaler of its own runs at 2 copies (or its disruption budget's floor) for 12 hours a day",
+      "before": 372,
+      "name": "Fewer copies at quiet times",
+      "row": "fewer copies at quiet times"
+     },
+     {
+      "after": 248,
+      "assumption": "the machines running at quiet times, 12 h a day, on spot",
+      "before": 248,
+      "name": "Spot",
+      "row": "spot"
+     }
+    ],
+    "usage": null,
+    "workloads": [
+     {
+      "cpu": 2000,
+      "held": false,
+      "kind": "Deployment",
+      "memory": 4294967296,
+      "name": "a",
+      "namespace": "shop",
+      "raised": false,
+      "share": 134
+     },
+     {
+      "cpu": 1000,
+      "held": false,
+      "kind": "Deployment",
+      "memory": 12884901888,
+      "name": "b",
+      "namespace": "shop",
+      "raised": false,
+      "share": 158
+     }
+    ]
+   }
+  ],
+  "not_assessed": [],
+  "saving": 482,
+  "subscriptions": {
+   "sub-one": "subscription-one"
+  },
+  "today": 730,
+  "unread": []
+ },
+ "started": "Nothing in your cloud was changed."
+}

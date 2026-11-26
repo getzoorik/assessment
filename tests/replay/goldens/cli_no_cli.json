@@ -1,0 +1,10 @@
+{
+ "console": {
+  "run": [
+   "This needs the Azure CLI (az) or the AWS CLI (aws), signed in. Open Azure Cloud Shell (shell.azure.com) or AWS CloudShell and run it there."
+  ]
+ },
+ "exit": 0,
+ "files": [],
+ "reports": {}
+}

@@ -1,147 +1,181 @@
 # Contributing
 
-Thanks for helping. This repo holds two scripts:
-
-- `k8s.py` assesses Kubernetes clusters (AKS, EKS, or any cluster kubectl can reach);
-- `disks.py` assesses the data disks of Linux VMs on Azure and AWS.
-
-Each one reads a cloud account, estimates a saving and writes one PDF report. The [README](README.md) says exactly what each script reads, runs and writes. Read it first: it is our promise to the people who run them.
+Thanks for helping. This repo holds the `zoorik` Python package. Its one command, `zoorik assess`, reads the AKS and EKS clusters and the VM data disks of every Azure and AWS account the `az` and `aws` CLIs are signed in to, estimates a saving and writes one PDF report. The [README](README.md) says exactly what it reads, changes and writes. Read it first: it is our promise to the people who run it.
 
 ## Before you start
 
-- **What is on `main` runs for everyone.** `zoorik.com/assess/k8s` and `zoorik.com/assess/disks` redirect to the files on `main`, so a merged change reaches the next person who pastes the line. The `zoorik` package on PyPI gets it at the next release.
+- **What is on `main` reaches everyone at the next release.** The package on PyPI and the npm launcher are built from release tags of this repo.
 - **Open an issue first** for anything bigger than a small fix, so we can agree on the approach before you write it.
 - **New here?** Issues labelled [good first issue](https://github.com/getzoorik/assessment/labels/good%20first%20issue) are small and say where to start.
 
-## The rules the scripts follow
+## The rules the code follows
 
-- **One file, standard library only.** Each script is a single Python file that runs as `curl ... | python3 -`. No third-party packages, and a script never imports another file of this repo. It must run on Python 3.8 and later. The `zoorik` package ships the two files unchanged.
-- **Read only.** Apart from the steps the README describes (`az aks command invoke` in k8s.py, and Azure Run Command or AWS Systems Manager Run Command after a yes in disks.py), the scripts only read. Don't add a call that changes anything in a cloud or a cluster.
-- **Send nothing.** No telemetry and no uploads. The only network calls go to the user's cloud, their clusters and the clouds' price lists.
-- **Keep only what the report needs.** Every field a script reads and every figure it works out serves the PDF report or the lines the run prints. k8s.py never reads Secrets or ConfigMaps, and never keeps env values, annotations or pod IPs. When you read something new, keep only the fields you use.
-- **Never guess a figure.** When a value can't be known, never show it as 0: leave it out and let the report give the reason, such as under Not in the saving yet.
-- **Run everywhere.** Both scripts run on Linux, macOS and Windows. Call a CLI through `run` (k8s.py) or `cli` (disks.py), which find `az.cmd` on Windows and pass any argument `cmd.exe` would change through a file. Don't use `/dev/tty`, POSIX-only signals or shell syntax outside those.
-- **Keep the docs in step.** If you change what a script reads, runs, writes or how it estimates, update the README in the same pull request.
-- **Bump `VERSION`** near the top of the script you change, so the first line a run prints shows which code made the report.
+- **Standard library only at runtime,** on Python 3.8 and later. The tools in `requirements-dev.txt` are for the checks only.
+- **Read only.** Apart from the two steps the README describes (`az aks command invoke` in an AKS cluster whose API server is private or limited to authorized IP ranges, and Azure Run Command or Systems Manager Run Command inside VMs after a yes), the run only reads. Don't add a call that changes anything in a cloud or a cluster.
+- **Send nothing.** No telemetry and no uploads. The only network calls go to the user's clouds, their clusters and the public price lists.
+- **Keep only what the report needs.** `zoorik/kubectl/objects.py` is the allowlist of the fields the run reads in a cluster. Both read methods use it, and the jq filter that runs inside the cluster through command invoke is generated from it. When you read something new, add only the fields you use.
+- **Never guess a figure.** When a value can't be known, don't show it as 0: leave it out and let the report give the reason, such as under Not in the saving yet.
+- **One rule per decision.** No fallbacks: no "try one way, then another", no aliases for removed commands or options, no old paths kept alive. How a cluster is read is decided from its settings, before the read.
+- **Run everywhere.** The package runs on Linux, macOS and Windows. Every program starts through the command runner in `zoorik/system/process.py`, which finds `az.cmd` on Windows, and `zoorik/cloud/cli.py` passes any `az` argument that `cmd.exe` would change through a file. Calls that exist on one platform only sit under `sys.platform` checks.
+- **Name the two parts `kubernetes` and `disks`,** in modules, files, classes, functions and messages.
+- **Keep the docs in step.** If you change what the run reads, changes or writes, or how it estimates, update the README in the same pull request. A new permission goes under "Access it needs", and a new Kubernetes kind in the `kubectl create clusterrole` line there, because people grant exactly that role.
 
-## What you need
+## Set up
 
-| Script | Needs |
-|---|---|
-| `k8s.py` | `python3` and `kubectl`. For AKS, the `az` CLI, plus `kubelogin` for clusters that sign in with Entra ID. For EKS, the `aws` CLI. For usage figures, metrics-server in the cluster. |
-| `disks.py` | `python3`, and a signed-in `az` CLI with Reader on a subscription or a signed-in `aws` CLI with the access the README lists. |
-
-Both run on Linux, macOS and Windows. Azure Cloud Shell and AWS CloudShell already have all of these.
-
-## Run a script from your clone
+The pinned check tools need Python 3.11 to 3.13: mypy runs on 3.9 to 3.13, and import-linter on 3.11 or later. CI uses 3.13, whose venv also keeps itself out of git.
 
 ```bash
-python3 k8s.py --help
-python3 k8s.py --context kind-kind --no-prices --sample-minutes 0
-python3 disks.py
+git clone https://github.com/getzoorik/assessment.git
+cd assessment
+python3.13 -m venv .venv
+. .venv/bin/activate            # Windows: .venv\Scripts\activate
+python -m pip install -r requirements-dev.txt
 ```
 
-- **k8s.py:** a local cluster (kind, minikube or k3d) is enough to try most changes. Install metrics-server to get usage; on kind it needs the `--kubelet-insecure-tls` flag. `--no-prices` skips the price lookups and `--sample-minutes 0` takes one sample, so a run takes seconds. Name the cluster with `--context`: with no options, the script assesses the AKS clusters in your current Azure subscription and the EKS clusters in your AWS account, wherever `az` or `aws` is signed in.
-- **disks.py:** you need an Azure subscription or an AWS account. A small Linux VM with one data disk is enough; on AWS, make it a Nitro instance type that Systems Manager manages, so the in-VM step can reach it. It assesses each cloud whose CLI is signed in. It asks before it runs anything inside a VM; answer N to keep the run read-only. Apart from `--help` and `--version`, it has no options yet.
-- **Windows:** run the scripts from PowerShell or Command Prompt (`py k8s.py`, `py disks.py`). The disk assessment asks its y/N question on the console; in Git Bash, which has none, it skips the in-VM step and says so.
+From the clone's root, `python -m zoorik.cli assess --help` runs your working copy. A real run reads every cloud your `az` and `aws` CLIs are signed in to, so run it only against accounts and clusters you own. `--sample-minutes 0` takes one usage sample, so a run takes seconds. It asks before it runs anything inside a VM; answer N to keep the run read-only.
 
 ## How the code is laid out
 
-Both files are split into sections, each headed by a `# ----` line with its name.
-
-**k8s.py**
-- *commands:* `run`, `az` and `aws` wrap the CLI calls. An expected failure raises `Failed` with a short reason, and `_REASONS` turns tool errors into those reasons.
-- *kubectl* and *command invoke:* `fetch_direct` reads the kinds in `RESOURCES` with kubectl. `fetch_invoke` reads them through `az aks command invoke` when kubectl can't read an AKS cluster.
-- *discovery:* `choose_targets`, `discover_azure`, `discover_aws` and `kube_contexts` decide which clusters to read, one `Target` each.
-- *collectors:* `collect` reads one cluster, `build` turns what it read into `Node`, `Pod` and `Workload`, and `sample_all` takes the `kubectl top` samples.
-- *pricing:* `Pricer.hourly`, `azure_price` and `aws_price`.
-- *estimate:* `estimate` and `keep_minimums`.
-- *pdf writer:* the layout and the file; see below.
-- *report:* `report` builds the pages from the figures. `figure` rounds each node pool's cost to whole dollars first, so every total is the sum of the figures shown, and `split` shares a cluster's saving across its workloads.
-
-**disks.py**
-- *commands:* `cli` runs every `az` and `aws` call and retries when the cloud throttles; `az`, `aws`, `rest`, `http_json`, `parallel` and `ask`.
-- *inventory:* the Resource Graph queries (`VM_QUERY`, `DISK_QUERY`, `MANAGED_GROUPS_QUERY`), run by `graph` and `inventory`.
-- *AWS inventory:* `aws_signed_in`, `aws_region` (instances, volumes, instance types, Systems Manager) and `ebs_limits`, which counts an instance's volume slots as Amoeba does.
-- *VM sizes and prices:* `region_facts`, `region_prices` and `price_disk`; on AWS, `ebs_prices` and `price_volume`.
-- *measured performance:* `disk_metrics` (Azure Monitor) and `volume_metrics` (CloudWatch).
-- *inside the VM:* `GUEST_SCRIPT`, `read_guest` (Azure Run Command), `read_instance` (Systems Manager Run Command) and `parse_guest`.
-- *pool sizing:* `pool_members` and the functions above it for Azure, `gp3_pool` for AWS. They use the constants at the top of the file, which are the numbers Amoeba itself plans with. Please open an issue before changing one.
-- *assessment:* `screen` and `assess` set each VM's reasons and saving, the same for both clouds; `azure_pool` and `aws_pool` size and price the pool.
-- *report:* `report` builds the pages from the figures. `tally` rounds each VM's cost to whole dollars first, so every total is the sum of the figures shown.
-- *pdf writer:* the layout and the file; see below.
-
-**The pdf writer** is the same block in both files, from `# ---- pdf writer` to `# ---- end of pdf writer`. `Report` lays out the A4 pages: the banner, the cards (`Kpis`, `Card`, `NextSteps`), page breaks and the footer. `Pdf` writes the file in Helvetica, one of the standard PDF fonts, so no font is embedded. A change to the block goes into both files, unchanged.
-
-**zoorik/**, the `zoorik` command for people who install the package:
-- `__main__.py` starts `k8s.py` or `disks.py`. The wheel ships both files inside the package (see `force-include` in `pyproject.toml`), so the package needs no copy of them.
-- `__init__.py` holds the package version.
-
-## Add a check
-
-- **k8s.py, a new figure:** work it out in `build` or `estimate`, and show it in `report`. Read and keep only what the report shows.
-- **k8s.py, a new Kubernetes resource to read:**
-  - add it to `RESOURCES` with a jq filter that keeps only the fields you use (`az aks command invoke` runs that filter inside the cluster);
-  - if its objects carry data the report must not keep, such as env values, or are large, add a `slim_*` function to `SLIM`; kubectl reads use it to drop the rest;
-  - add it to "What it reads" and to the `kubectl create clusterrole` line in the README, because people grant exactly that role.
-- **disks.py, a new reason a VM can't be pooled:** add it to `red` in `screen` (from what the cloud reports) or in `assess` (from what the VM reports). The report lists that VM under Not in the saving yet, with the reason. A reason in `amber` is a fix the VM needs first; on its own it leaves the VM in the saving. Update the list under "Not in the saving yet" in the README.
-- **disks.py, a new disk type:** add it to `DISK_TYPES`, then teach `add_price` and `price_disk` its price meters (on AWS, `EBS_BILLS`).
-- **Any check that needs a new CLI call or permission:** add it to "Access it needs" in the README.
-
-## Add a cloud, a region or a price
-
-- **Regions** come from the cloud at run time, and prices are looked up by region name, so most new regions need no code. If a report says "no list price for ... in REGION", first check that the public price list has that region.
-- **k8s.py prices:** `Pricer.hourly` decides whether a node can be priced, and `azure_price` and `aws_price` fetch the price. A new source must give public list prices, read through a public URL or a CLI the script already uses.
-- **k8s.py, a new cloud or platform:** `make_node` recognises nodes. It takes the cloud from `spec.providerID` or the labels, the pool from `POOL_LABELS`, and Spot or on-demand from the labels. `choose_targets` finds clusters. A platform without a discovery step can still be read with `--context`.
-- **disks.py, Premium SSD v2 on VMs without a zone:** Azure's API doesn't say where this is offered, so `V2_NONZONAL_REGIONS` is copied by hand from the Microsoft Learn page "Deploy a Premium SSD v2 managed disk" (Regional availability). To add a region, link that page in your pull request and update the date in the comment above the list.
-- **disks.py, disk sizes and limits:** `TIER_SIZES`, `V1_TIER_PERFORMANCE` and the `V2_*` limits come from Azure's documentation. Link the page you used. The `GP3_*` limits and the EBS slot rules are Amoeba's own, from its AWS adapter.
-
-## Test a change
-
-There is no test suite yet. CI runs these checks on every pull request, on Linux, macOS and Windows, with the newest Python, and on Linux with Python 3.8 too:
-
-```bash
-python3 -m py_compile k8s.py disks.py
-pipx run --spec ruff==0.16.10 ruff check .
-python3 k8s.py --help
-python3 k8s.py --context no-such-context --no-prices --sample-minutes 0 --out /tmp/zoorik-report/
+```
+zoorik/
+  __init__.py      the version, and the address the report asks to be sent to
+  cli.py           the command line: builds the real runtime and the typed clients, runs both parts side by side,
+                   writes the report, the exit codes and the stop
+  errors.py        one exception type per kind of failure
+  console.py       the terminal: whole lines, the one status line, lines held while a question is open
+  format.py        the shared number formats and units: half_up, usd, count, cents, GiB and minutes
+  output.py        the report's folder, checked before any read, and its file, never overwritten
+  system/          the outside world behind protocols: process.py (the only user of subprocess), http.py (the
+                   HttpClient protocol), clock.py, prompt.py, workers.py, memo.py, env.py (the environment's facts)
+                   and runtime.py
+  cloud/           az and aws: cli.py (one CLI call, its JSON, the retry when throttled, the reasons), azure.py,
+                   aws.py, keys.py (each cloud's key and names), fields.py, shell.py (which Cloud Shell) and
+                   started.py (what the run started in the cloud)
+  kubectl/         the cluster reads: objects.py (the allowlist), api.py (KubeApi, Snapshot), direct.py (kubectl),
+                   invoke.py (az aks command invoke), usage.py (kubectl top) and quantity.py
+  pricing/         http.py (the one HTTP policy, the only user of urllib.request), retail.py (the Azure Retail
+                   Prices API), machines.py, disks.py, azure_disks.py and aws_ebs.py
+  kubernetes/      the Kubernetes part: discovery.py (which clusters, and how each is read), collect.py (pools,
+                   machines and pods), placement.py (where a pod may run), packing.py, catalogue.py (the machine
+                   types a region offers), allocatable.py (what a type the cluster doesn't run gives its pods),
+                   shares.py, model.py, assessment.py and steps/ (the saving steps, in order)
+  disks/           the disk part: azure_inventory.py, aws_inventory.py, facts.py, metrics.py, guest.py (the read
+                   inside a VM), pools.py, model.py and assessment.py
+  report/          the PDF: pdf.py and blocks.py (the engine), summary.py (page 1), kubernetes_pages.py,
+                   disks_pages.py, closing.py (Not in the saving yet and Next steps), figures.py, names.py
+                   (--anonymize) and document.py
+tests/
+  unit/            the unit tests, plus test_layers.py and test_names.py
+  replay/          record and replay: the fake cloud, the scenarios and the goldens
 ```
 
-- The last command reaches no cluster. It shows that a run still finishes, and writes a report, when a cluster can't be assessed. CI checks that the report is a whole PDF: it starts with `%PDF-`, ends with `%%EOF`, and its cross-reference table points at each object.
-- CI also runs disks.py where neither `az` nor `aws` is installed, and checks that it stops with the message that asks for one. Where both are installed but not signed in, it checks that both scripts say to sign in, which shows they found `az.cmd` on Windows.
-- CI also installs the package with `pip install .` and runs the same no-cluster report through `zoorik assess coral`, and checks that `npx zoorik` (the `npm/` folder) runs the PyPI package, on all three systems.
-- `ruff.toml` sets Python 3.8 as the target, so ruff also flags syntax that is newer than 3.8. If you use uv, `uv run --python 3.8 k8s.py --help` tries Python 3.8 locally.
+Pages never work out figures, and figures never draw. Values are frozen dataclasses, and each constant lives in the module that owns it.
 
-To try the AWS path of disks.py without an account, put a small fake `aws` script first on your PATH that prints canned JSON for the calls `disks.py` makes (each goes through `aws(...)`), and keep `az` off the PATH.
+## The layers, and what enforces each rule
 
-Then run your change for real, against a cluster, subscription or AWS account you own, and open the report in any PDF viewer. To compare it with the report from `main`, render both with `pdftoppm -png -r 110 REPORT.pdf page` (poppler) and look at the pages side by side. In the pull request, say what you ran and what changed in the report. Replace your own names, or run k8s.py with `--anonymize`. Never commit a report file: it names things in your account.
+Each layer imports only the layers below it, highest first: `cli`; `report`; `kubernetes` and `disks`; `kubectl` and `pricing`; `cloud`; `system`; `console`, `format` and `output`; `errors`.
+
+| Rule | Enforced by |
+|---|---|
+| Each layer imports only the layers below it; nothing imports `cli.py`; `kubernetes` and `disks` never import each other | import-linter's layers contract in `pyproject.toml` |
+| Only the runtime, `cloud/` and `kubectl/` import the command runner | import-linter, a protected contract |
+| Only the runtime, `cloud/` and `pricing/` import the HTTP protocol | import-linter, a protected contract |
+| Only `cli.py` imports the runtime and the HTTP client in `pricing/http.py` | import-linter, a protected contract |
+| Only `report/` draws the PDF | import-linter, a protected contract |
+| `subprocess` is imported only in `zoorik/system/process.py` | `tests/unit/test_layers.py` |
+| `urllib.request` and `http.client` are imported only in `zoorik/pricing/http.py` | `tests/unit/test_layers.py` |
+| Only `cloud/` builds an `az` or `aws` command, and only `kubectl/` a `kubectl` or `kubelogin` command | `tests/unit/test_layers.py` |
+| One catch-all, in `cli.py`; no bare `except` and no `except Exception` anywhere else | `tests/unit/test_layers.py` |
+| File and folder names hold no product name and no short form of Kubernetes; products are named only where the report says what to do next; the short form appears only in the label keys `k8s.io` and `k8s.aws` | `tests/unit/test_names.py` |
+
+## Run the checks
+
+CI runs these on every pull request. Run them from the clone's root, in the venv:
+
+```bash
+ruff check .
+ruff format --check .
+mypy --platform linux
+mypy --platform win32
+lint-imports --no-cache
+python -m unittest discover -s tests -t .
+```
+
+- **ruff** checks a wide rule set (pycodestyle, pyflakes, import order, PEP 8 names, PEP 257 docstrings, complexity, bugbear, pyupgrade, simplify, pylint and ruff's own) with Python 3.8 as the target, and `ruff format` sets the layout. There are no per-file ignores.
+- **mypy** runs in strict mode, once for each platform, so the Windows and the POSIX branches are both checked.
+- **The unit tests** also replay every scenario against its golden and check that each PDF is whole. They must pass on Python 3.8 too: CI runs them on Linux, macOS and Windows with the newest Python, and on Linux with Python 3.8.
+
+CI also installs the package with `pip install .`, runs the command where no cloud CLI is installed and where `az` and `aws` are installed but not signed in, and runs the npm launcher and `npx` against a wheel built from the same commit.
+
+## Record and replay
+
+The tests never reach a real cloud. Each run in `tests/replay/` answers every `az`, `aws`, `kubectl` and price call from a scenario, through the fake cloud in `tests/replay/fake_cloud.py`, on a virtual clock. The scenarios are in `kubernetes.py`, `disks.py` and `estates.py` (the whole command), built with the helpers in `scenarios.py`, and `clusters.py` holds made-up API objects for the cluster readers. Names, ids and prices are neutral and round, so each figure can be worked out by hand. Each scenario's golden, in `tests/replay/goldens/`, holds the exit code, the console lines of each part and, for each PDF, its normalized hash, its page count and its text.
+
+- **A change that changes a report on purpose** rewrites the goldens with `python -m tests.replay update`, which runs the tests and writes every golden from what the code gives. Read the diff of the goldens: it is part of the review.
+- **A real run, recorded:** `python -m tests.replay record --out FILE -- zoorik assess [options]` runs the command for real, against the clouds you are signed in to, and writes a redacted recording. The file must be outside the repo, and on Linux and macOS only you can read it. A recording keeps of each cluster read only the allowlist's fields, of each kubeconfig only whether it needs kubelogin, and of your environment only which Cloud Shell you ran in. It still names your accounts, clusters and VMs, so never commit one or attach it to an issue.
+
+## Add a step
+
+A saving step is a class with a `name`, the page-1 `row` its saving counts in, the `assumption` its figure rests on ("" for none), which the report states beside the figure, and `apply(state)`, which gives the cluster state the step leaves (the `Step` protocol in `zoorik/kubernetes/steps/__init__.py`).
+
+1. Write it in its own module under `zoorik/kubernetes/steps/`. Place pods only through `zoorik/kubernetes/placement.py` and `zoorik/kubernetes/packing.py`, so every step keeps the same placement rules.
+2. Add it to the pipeline in `zoorik/kubernetes/assessment.py`, in its place. Each step works on what the one before left, and the pipeline doesn't apply a step that would cost more, so no step is negative and the steps add up exactly.
+3. Test it with a figure worked out by hand, add a replay scenario, and update the goldens.
+4. Describe it under "How the estimate works" in the README, and add it to the steps `zoorik assess --help` lists (`STEPS` in `zoorik/cli.py`).
+
+## Add a cloud
+
+Each outside system is one protocol, with an Azure and an AWS implementation:
+
+| Protocol | Lives in |
+|---|---|
+| `ClusterSource`: the clusters, and how each is read | `zoorik/kubernetes/discovery.py` |
+| `KubeApi`: one cluster's objects and usage | `zoorik/kubectl/api.py` |
+| `MachinePrices`: a machine type's hourly list price | `zoorik/pricing/machines.py` |
+| `MachineCatalogue`: the machine types a region offers | `zoorik/kubernetes/catalogue.py` |
+| `VmInventory`: the VMs and their data disks | `zoorik/disks/assessment.py` |
+| `GuestReader`: the read inside a VM | `zoorik/disks/guest.py` |
+| `DiskMetrics`: a disk's busiest minute of each hour | `zoorik/disks/metrics.py` |
+| `DiskPrices`: a disk's monthly list price | `zoorik/pricing/disks.py` |
+
+A new cloud is a new CLI client in `zoorik/cloud/` (the only place that builds its commands), an implementation of each protocol, and the wiring in `cli.py`, which alone builds the concrete classes. Prices must be public list prices, read through a public URL or the cloud's own CLI. Add replay scenarios for it, and its permissions to "Access it needs" in the README.
+
+## Regions, prices and limits
+
+- **Regions** come from the cloud at run time, and prices are looked up by region, so most new regions need no code. If a report says there is no list price in a region, first check that the public price list has that region.
+- **Premium SSD v2 on VMs without a zone:** Azure's API doesn't say where this is offered, so `V2_NONZONAL_REGIONS` in `zoorik/disks/facts.py` is copied by hand from the Microsoft Learn page "Deploy a Premium SSD v2 managed disk" (Regional availability). To add a region, link that page in your pull request and update the date in the comment above the list.
+- **Disk sizes and limits:** the Premium SSD sizes and performance and the Premium SSD v2 and gp3 limits in `zoorik/disks/pools.py`, and the gp3 baseline in `zoorik/pricing/aws_ebs.py`, come from the clouds' documentation. Link the page you used. The pool sizing constants at the top of that file are the disk method's own; please open an issue before changing one.
 
 ## Code style
 
-- Match the code around you: type hints, dataclasses, short docstrings, and `Failed("short reason")` for anything the user can fix.
-- Keep the diff to your change; please don't reformat whole files. Lines go up to about 120 characters.
+- Type hints everywhere, checked by mypy in strict mode; PEP 8 names; a PEP 257 docstring on every module, class and function; dataclasses for values.
+- One exception type per kind of failure, from `zoorik/errors.py`. Its text is the short reason the reader sees. Catch by type, never by text.
+- A one-line comment says why, wherever a line guards something.
 - Text the user sees is plain and short.
+- Keep the diff to your change; lines go up to 120 characters.
 
 ## Pull requests
 
 1. Fork the repo and make a branch.
 2. Keep each pull request to one change.
-3. Say what you changed, why, and how you tested it.
+3. Say what you changed, why, and how you tested it. If you ran it for real, say against what kind of estate, and replace your own names, or run with `--anonymize`. Never commit a report or a recording: they name things in your account.
 4. CI must pass. A maintainer reviews every pull request and merges it.
 
 By sending a pull request, you agree that your contribution is licensed under Apache-2.0, the license of this repo.
 
 ## Releases
 
-Maintainers publish the `zoorik` package to PyPI:
+Maintainers publish the `zoorik` package to PyPI, and its launcher to npm:
 
 1. Bump `__version__` in `zoorik/__init__.py`, and `version` in `npm/package.json` to the same number, in a pull request.
-2. Once it is merged, publish a GitHub release whose tag is `v` plus that version, such as `v1.0.1`.
-3. The release workflow checks that the tag matches the version, builds the package and installs it once. It publishes to PyPI after a maintainer approves the `pypi` environment, then the same version to npm. PyPI trusts this workflow directly (trusted publishing), so no PyPI token is stored anywhere.
+2. Once it is merged, publish a GitHub release whose tag is `v` plus that version, such as `v2.0.1`.
+3. The release workflow checks that the tag matches both versions, builds the package with `build` 1.6.1, installs the wheel, and runs `zoorik --version` and `zoorik assess --help`. It publishes to PyPI after a maintainer approves the `pypi` environment, then the same version to npm. PyPI trusts this workflow directly (trusted publishing), so no PyPI token is stored anywhere.
+
+The npm launcher installs exactly its own version from PyPI, so each npm release runs the PyPI release of the same number.
 
 ## Security and conduct
 
-- Please don't report a security problem in a public issue. Use **Report a vulnerability** on the repo's Security tab, or e-mail founders@zoorik.com.
+- Please don't report a security problem in a public issue. Use **Report a vulnerability** on the repo's Security tab, or email founders@zoorik.com.
 - Everyone who takes part follows our [Code of Conduct](https://github.com/getzoorik/.github/blob/main/CODE_OF_CONDUCT.md).
 
 Questions: founders@zoorik.com.

@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "zoorik"
 dynamic = ["version"]
-description = "Zoorik's free cost assessments for Kubernetes (AKS, EKS) and VM disks (Azure, AWS): one PDF report of what you could save."
+description = "Zoorik's free cloud cost assessment for Kubernetes (AKS, EKS) and VM disks (Azure, AWS): one command, one PDF report of what you could save."
 readme = "README.md"
 requires-python = ">=3.8"
 license = "Apache-2.0"
@@ -27,7 +27,7 @@ Source = "https://github.com/getzoorik/assessment"
 Issues = "https://github.com/getzoorik/assessment/issues"
 
 [project.scripts]
-zoorik = "zoorik.__main__:main"
+zoorik = "zoorik.cli:main"
 
 [tool.hatch.version]
 path = "zoorik/__init__.py"
@@ -35,9 +35,52 @@ path = "zoorik/__init__.py"
 [tool.hatch.build.targets.wheel]
 packages = ["zoorik"]
 
-[tool.hatch.build.targets.wheel.force-include]
-"k8s.py" = "zoorik/k8s.py"
-"disks.py" = "zoorik/disks.py"
-
 [tool.hatch.build.targets.sdist]
-include = ["/zoorik", "/k8s.py", "/disks.py", "/README.md", "/LICENSE"]
+include = ["/zoorik"]
+
+[tool.mypy]
+python_version = "3.8"
+strict = true
+warn_unreachable = true
+files = ["zoorik", "tests"]
+
+[tool.importlinter]
+root_package = "zoorik"
+
+[[tool.importlinter.contracts]]
+name = "Each layer imports only the layers below it"
+type = "layers"
+layers = [
+  "zoorik.cli",
+  "zoorik.report",
+  "zoorik.kubernetes | zoorik.disks",
+  "zoorik.kubectl | zoorik.pricing",
+  "zoorik.cloud",
+  "zoorik.system",
+  "zoorik.console | zoorik.format | zoorik.output",
+  "zoorik.errors",
+]
+
+[[tool.importlinter.contracts]]
+name = "Only the runtime, the cloud readers and the cluster readers hold the command runner"
+type = "protected"
+protected_modules = ["zoorik.system.process"]
+allowed_importers = ["zoorik.system.runtime", "zoorik.cloud", "zoorik.kubectl"]
+
+[[tool.importlinter.contracts]]
+name = "Only the runtime, the cloud readers and the price lists hold the HTTP client"
+type = "protected"
+protected_modules = ["zoorik.system.http"]
+allowed_importers = ["zoorik.system.runtime", "zoorik.cloud", "zoorik.pricing"]
+
+[[tool.importlinter.contracts]]
+name = "Only the command line builds the runtime and the HTTP client"
+type = "protected"
+protected_modules = ["zoorik.system.runtime", "zoorik.pricing.http"]
+allowed_importers = ["zoorik.cli"]
+
+[[tool.importlinter.contracts]]
+name = "Only the report draws the PDF"
+type = "protected"
+protected_modules = ["zoorik.report.pdf", "zoorik.report.blocks"]
+allowed_importers = ["zoorik.report"]

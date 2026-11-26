@@ -1,0 +1,18 @@
+{
+ "console": {
+  "Disks": [
+   "1 subscription with no VMs or disks."
+  ],
+  "Kubernetes": [
+   "1 subscription with no AKS clusters."
+  ],
+  "run": [
+   "Zoorik cloud cost assessment <version>. It sends nothing to Zoorik; you send the report yourself.",
+   "Azure: Directory One (one.example.test), 1 enabled subscription",
+   "Nothing to report: the run found no cluster machine or VM data disk with a list price."
+  ]
+ },
+ "exit": 0,
+ "files": [],
+ "reports": {}
+}

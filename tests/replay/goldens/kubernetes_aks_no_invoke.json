@@ -1,0 +1,33 @@
+{
+ "console": [
+  "Cluster cluster-private (westeurope): not assessed, its API server is private (or limited to authorized IP ranges); run without --no-invoke to read it through az aks command invoke",
+  "Cluster cluster-ranges (westeurope): not assessed, its API server is private (or limited to authorized IP ranges); run without --no-invoke to read it through az aks command invoke"
+ ],
+ "result": {
+  "after": 0,
+  "clusters": [],
+  "not_assessed": [
+   {
+    "account": "sub-one",
+    "cloud": "azure",
+    "name": "cluster-private",
+    "reason": "its API server is private (or limited to authorized IP ranges); run without --no-invoke to read it through az aks command invoke",
+    "region": "westeurope"
+   },
+   {
+    "account": "sub-one",
+    "cloud": "azure",
+    "name": "cluster-ranges",
+    "reason": "its API server is private (or limited to authorized IP ranges); run without --no-invoke to read it through az aks command invoke",
+    "region": "westeurope"
+   }
+  ],
+  "saving": 0,
+  "subscriptions": {
+   "sub-one": "subscription-one"
+  },
+  "today": 0,
+  "unread": []
+ },
+ "started": "Nothing in your cloud was changed."
+}

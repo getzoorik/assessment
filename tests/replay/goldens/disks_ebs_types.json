@@ -1,0 +1,147 @@
+{
+ "console": [
+  "Region eu-west-1: 1 instance, 4 volumes"
+ ],
+ "questions": [
+  "\nDisk usage\n  1 running Linux instance has data volumes:\n    eu-west-1: i-01\n\n  The saving needs the used space on those volumes, which only the instance itself can report.\n  With your yes, this command, which only reads, runs in each instance through AWS Systems\n  Manager Run Command (AWS-RunShellScript), 8 instances at a time (about 1 min):\n\n    echo S\n    echo \"K $(uname -r)\"\n    if grep -qw btrfs /proc/filesystems; then echo \"B loaded\"; elif modinfo -n btrfs >/dev/null 2>&1; then echo \"B module\"; else echo \"B absent\"; fi\n    for l in /dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_vol*; do case $l in *-part*) continue;; esac; [ -e \"$l\" ] || continue; v=${l##*_vol}; echo \"V vol-${v%%[-_]*} $(lsblk -nro MOUNTPOINT \"$l\" | tr '\\n' ' ')\"; done\n    timeout 30 df -P -B1 -l | awk '$1 ~ /^\\/dev\\// && $1 !~ /^\\/dev\\/loop/ {m=$6; for (i=7; i<=NF; i++) m=m\" \"$i; print \"D\", $3, m}'\n    echo E\n\n  On its side, Systems Manager keeps the command and its output in its Run Command history,\n  its agent keeps a copy under /var/lib/amazon/ssm on the instance, and CloudTrail records\n  each call. It needs the permissions ssm:SendCommand and ssm:GetCommandInvocation;\n  an instance without them shows no saving, with the reason.\n\nRead disk usage inside 1 instance with Systems Manager Run Command? [y/N] "
+ ],
+ "result": {
+  "after": 43,
+  "not_assessed": [],
+  "saving": 377,
+  "subscriptions": {},
+  "today": 420,
+  "unread": [],
+  "vms": [
+   {
+    "current": 420.0,
+    "price_note": "",
+    "reasons": [],
+    "saving": {
+     "pool_cost": 42.8,
+     "pool_gb": 504,
+     "pooled": [
+      {
+       "ade": false,
+       "cloud": "aws",
+       "id": "vol-01",
+       "iops": 1500,
+       "mbps": null,
+       "region": "eu-west-1",
+       "shared": false,
+       "size_gb": 500,
+       "sku": "gp2",
+       "tier": ""
+      },
+      {
+       "ade": false,
+       "cloud": "aws",
+       "id": "vol-02",
+       "iops": 3000,
+       "mbps": 125,
+       "region": "eu-west-1",
+       "shared": false,
+       "size_gb": 1000,
+       "sku": "gp3",
+       "tier": ""
+      },
+      {
+       "ade": false,
+       "cloud": "aws",
+       "id": "vol-03",
+       "iops": 4000,
+       "mbps": null,
+       "region": "eu-west-1",
+       "shared": false,
+       "size_gb": 400,
+       "sku": "io1",
+       "tier": ""
+      }
+     ],
+     "staying": [],
+     "staying_cost": 0.0,
+     "today": 420.0
+    },
+    "used_gb": 440.0,
+    "vm": {
+     "account": "123456789012",
+     "channel": null,
+     "cloud": "aws",
+     "data": [
+      {
+       "device": "/dev/sdf",
+       "disk": {
+        "ade": false,
+        "cloud": "aws",
+        "id": "vol-01",
+        "iops": 1500,
+        "mbps": null,
+        "region": "eu-west-1",
+        "shared": false,
+        "size_gb": 500,
+        "sku": "gp2",
+        "tier": ""
+       },
+       "lun": 0,
+       "note": "",
+       "size_gb": 500
+      },
+      {
+       "device": "/dev/sdg",
+       "disk": {
+        "ade": false,
+        "cloud": "aws",
+        "id": "vol-02",
+        "iops": 3000,
+        "mbps": 125,
+        "region": "eu-west-1",
+        "shared": false,
+        "size_gb": 1000,
+        "sku": "gp3",
+        "tier": ""
+       },
+       "lun": 1,
+       "note": "",
+       "size_gb": 1000
+      },
+      {
+       "device": "/dev/sdh",
+       "disk": {
+        "ade": false,
+        "cloud": "aws",
+        "id": "vol-03",
+        "iops": 4000,
+        "mbps": null,
+        "region": "eu-west-1",
+        "shared": false,
+        "size_gb": 400,
+        "sku": "io1",
+        "tier": ""
+       },
+       "lun": 2,
+       "note": "",
+       "size_gb": 400
+      }
+     ],
+     "facts_note": "",
+     "id": "i-01",
+     "limits": {
+      "free_slots": 18,
+      "nitro": true,
+      "slots": 21,
+      "uncached_iops": 12000,
+      "uncached_mbps": 312
+     },
+     "managed_by": null,
+     "name": "i-01",
+     "os_type": "Linux",
+     "power": "Running",
+     "region": "eu-west-1",
+     "size": "m6i.2xlarge",
+     "zone": null
+    }
+   }
+  ]
+ },
+ "started": "Systems Manager Run Command had already started in 1 instance (see its Run Command history); nothing else in your cloud was changed."
+}

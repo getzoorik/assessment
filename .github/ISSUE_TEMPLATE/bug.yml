@@ -1,25 +1,16 @@
-name: Bug in a script
-description: k8s.py or disks.py stopped, did something wrong, or showed a wrong figure.
+name: Bug in the assessment
+description: zoorik assess stopped, did something wrong, or showed a wrong figure.
 labels: ["bug"]
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for telling us. This repo is public, so please don't attach your PDF report, and replace cluster, VM, subscription and account names with placeholders such as `cluster-a`. You can also e-mail the report to founders@zoorik.com.
-  - type: dropdown
-    id: script
-    attributes:
-      label: Script
-      options:
-        - k8s.py (Kubernetes)
-        - disks.py (Azure disks)
-    validations:
-      required: true
+        Thanks for telling us. This repo is public, so please don't attach your PDF report, and replace cluster, VM, subscription and account names with placeholders such as `cluster-a`. You can also email the report to founders@zoorik.com.
   - type: input
     id: version
     attributes:
-      label: Script version
-      description: 'The first line the script prints, such as "Zoorik Coral: Kubernetes assessment 1.0.0".'
+      label: Version
+      description: 'The output of `zoorik --version`, such as "zoorik 2.0.0".'
     validations:
       required: true
   - type: dropdown
@@ -39,12 +30,12 @@ body:
     id: tools
     attributes:
       label: Python and CLI versions
-      description: "The output of `python3 --version`, and of whichever the script used: `kubectl version --client`, `az version` or `aws --version`."
+      description: "The output of `python3 --version`, and of whichever the run used: `kubectl version --client`, `az version` or `aws --version`."
   - type: textarea
     id: command
     attributes:
       label: The line you ran
-      placeholder: curl -fsSL https://zoorik.com/assess/k8s | python3 - --context cluster-a
+      placeholder: npx zoorik assess --anonymize
       render: shell
     validations:
       required: true

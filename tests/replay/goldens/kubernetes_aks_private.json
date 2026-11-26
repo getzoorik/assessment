@@ -1,0 +1,165 @@
+{
+ "console": [
+  "Cluster cluster-private (westeurope): 2 nodes, 8 pods"
+ ],
+ "result": {
+  "after": 292,
+  "clusters": [
+   {
+    "apps": [],
+    "bare_pods": 2,
+    "cheaper_types": "the allocatable memory of its Standard_D4s_v5 nodes doesn't follow the platform's reservation",
+    "cluster": {
+     "account": "sub-one",
+     "cloud": "azure",
+     "name": "cluster-private",
+     "region": "westeurope"
+    },
+    "fewer_copies": null,
+    "lines": [
+     {
+      "after": 2,
+      "capacity": "regular",
+      "cost_after": 292,
+      "cost_today": 292,
+      "hourly": 0.2,
+      "kind": "node pool",
+      "machine_type": "Standard_D4s_v5",
+      "note": "",
+      "pool": "system",
+      "quiet": 2,
+      "spot": null,
+      "spot_note": "",
+      "today": 2
+     }
+    ],
+    "not_machines": 0,
+    "steps": [
+     {
+      "after": 292,
+      "assumption": "",
+      "before": 292,
+      "name": "Smaller pods",
+      "row": "smaller pods and spare machines (packing included)"
+     },
+     {
+      "after": 292,
+      "assumption": "",
+      "before": 292,
+      "name": "Spare machines",
+      "row": "smaller pods and spare machines (packing included)"
+     },
+     {
+      "after": 292,
+      "assumption": "",
+      "before": 292,
+      "name": "Cheaper machine types",
+      "row": "cheaper machine types"
+     },
+     {
+      "after": 292,
+      "assumption": "",
+      "before": 292,
+      "name": "Packing across pools",
+      "row": "smaller pods and spare machines (packing included)"
+     },
+     {
+      "after": 292,
+      "assumption": "each app with 3 or more copies and no autoscaler of its own runs at 2 copies (or its disruption budget's floor) for 12 hours a day",
+      "before": 292,
+      "name": "Fewer copies at quiet times",
+      "row": "fewer copies at quiet times"
+     },
+     {
+      "after": 292,
+      "assumption": "the machines running at quiet times, 12 h a day, on spot",
+      "before": 292,
+      "name": "Spot",
+      "row": "spot"
+     }
+    ],
+    "usage": null,
+    "workloads": [
+     {
+      "cpu": 0,
+      "held": false,
+      "kind": "CronJob",
+      "memory": 0,
+      "name": "report",
+      "namespace": "batch",
+      "raised": true,
+      "share": 0
+     },
+     {
+      "cpu": 0,
+      "held": false,
+      "kind": "Pod",
+      "memory": 0,
+      "name": "debug",
+      "namespace": "default",
+      "raised": false,
+      "share": 0
+     },
+     {
+      "cpu": 0,
+      "held": false,
+      "kind": "Pod",
+      "memory": 0,
+      "name": "step-one",
+      "namespace": "default",
+      "raised": false,
+      "share": 0
+     },
+     {
+      "cpu": 40,
+      "held": false,
+      "kind": "DaemonSet",
+      "memory": 12582912,
+      "name": "agent",
+      "namespace": "kube-system",
+      "raised": false,
+      "share": 0
+     },
+     {
+      "cpu": 0,
+      "held": false,
+      "kind": "Pod",
+      "memory": 0,
+      "name": "kube-proxy-node-two",
+      "namespace": "kube-system",
+      "raised": false,
+      "share": 0
+     },
+     {
+      "cpu": 610,
+      "held": false,
+      "kind": "StatefulSet",
+      "memory": 1176502272,
+      "name": "db",
+      "namespace": "shop",
+      "raised": false,
+      "share": 0
+     },
+     {
+      "cpu": 0,
+      "held": false,
+      "kind": "Deployment",
+      "memory": 0,
+      "name": "web",
+      "namespace": "shop",
+      "raised": true,
+      "share": 0
+     }
+    ]
+   }
+  ],
+  "not_assessed": [],
+  "saving": 0,
+  "subscriptions": {
+   "sub-one": "subscription-one"
+  },
+  "today": 292,
+  "unread": []
+ },
+ "started": "az aks command invoke had already started in 1 cluster (see the activity log); nothing else in your cloud was changed."
+}

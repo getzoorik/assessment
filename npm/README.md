@@ -1,23 +1,20 @@
 # zoorik
 
-Zoorik's free cloud cost assessment. It estimates how much you can reduce your cloud bill and writes one PDF report for you to email to founders@zoorik.com. It sends nothing anywhere.
+Zoorik's free cloud cost assessment. One command reads your AKS and EKS clusters and the data disks of your VMs on Azure and AWS, estimates how much you could reduce your cloud cost, and writes one PDF report for you to email to founders@zoorik.com. It sends nothing anywhere.
 
 ```bash
-npx zoorik assess coral     # Kubernetes: AKS and EKS
-npx zoorik assess amoeba    # block storage: the data disks of your VMs on Azure and AWS
+npx zoorik assess
 ```
 
-It runs on Linux, macOS and Windows, and in Azure Cloud Shell and AWS CloudShell. It needs Python 3.8 or later. The first run creates a private Python environment in `~/.cache/zoorik` and installs the [zoorik package from PyPI](https://pypi.org/project/zoorik/) there, so nothing is installed into your system Python. Each later run updates it.
+It runs on Linux, macOS and Windows, and in Azure Cloud Shell and AWS CloudShell. It needs Python 3.8 or later, as `python3` (on Windows, `py -3`). The first run creates a private Python environment in `~/.cache/zoorik` and installs the [zoorik package from PyPI](https://pypi.org/project/zoorik/) there, at this launcher's own version, so nothing is installed into your system Python.
 
 With Python alone, the same thing is:
 
 ```bash
 pip install zoorik
-zoorik assess coral
+zoorik assess
 ```
 
-Where there is no `pip` command (macOS's own Python has only `pip3`), run `python3 -m pip install zoorik`, or on Windows `py -m pip install zoorik`.
-
-What each assessment reads, runs and writes is in [getzoorik/assessment](https://github.com/getzoorik/assessment). Steps for every cloud: [zoorik.com/assessment](https://zoorik.com/assessment).
+What it reads, changes and writes is in [getzoorik/assessment](https://github.com/getzoorik/assessment). Steps for every cloud: [zoorik.com/assessment](https://zoorik.com/assessment).
 
 Apache-2.0. Questions: founders@zoorik.com.

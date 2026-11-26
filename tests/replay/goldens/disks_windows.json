@@ -1,0 +1,68 @@
+{
+ "console": [
+  "Subscription subscription-one: 1 VM, 1 disk"
+ ],
+ "questions": [],
+ "result": {
+  "after": 70,
+  "not_assessed": [],
+  "saving": 0,
+  "subscriptions": {
+   "sub-one": "subscription-one"
+  },
+  "today": 70,
+  "unread": [],
+  "vms": [
+   {
+    "current": 70.0,
+    "price_note": "",
+    "reasons": [
+     "Windows VM: not estimated by this assessment yet"
+    ],
+    "saving": null,
+    "used_gb": null,
+    "vm": {
+     "account": "sub-one",
+     "channel": null,
+     "cloud": "azure",
+     "data": [
+      {
+       "device": "",
+       "disk": {
+        "ade": false,
+        "cloud": "azure",
+        "id": "/subscriptions/sub-one/resourceGroups/group-one/providers/Microsoft.Compute/disks/data-one",
+        "iops": 2300,
+        "mbps": 150,
+        "region": "westeurope",
+        "shared": false,
+        "size_gb": 512,
+        "sku": "Premium_LRS",
+        "tier": "P20"
+       },
+       "lun": 0,
+       "note": "",
+       "size_gb": 512
+      }
+     ],
+     "facts_note": "",
+     "id": "/subscriptions/sub-one/resourceGroups/group-one/providers/Microsoft.Compute/virtualMachines/vm-windows",
+     "limits": {
+      "slots": 16,
+      "uncached_iops": 12800,
+      "uncached_mbps": 290,
+      "v2": true
+     },
+     "managed_by": null,
+     "name": "vm-windows",
+     "os_type": "Windows",
+     "power": "Running",
+     "region": "westeurope",
+     "size": "Standard_D8s_v5",
+     "zone": "1"
+    }
+   }
+  ]
+ },
+ "started": "Nothing in your cloud was changed."
+}

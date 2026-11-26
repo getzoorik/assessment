@@ -1,0 +1,34 @@
+{
+ "console": [
+  "Subscription subscription-one: 2 VMs, 2 disks",
+  "2 VMs not assessed, could not tell which VMs are cluster nodes: access denied"
+ ],
+ "questions": [],
+ "result": {
+  "after": 0,
+  "not_assessed": [
+   {
+    "account": "sub-one",
+    "cloud": "azure",
+    "name": "vm-one",
+    "reason": "could not tell which VMs are cluster nodes: access denied",
+    "region": "westeurope"
+   },
+   {
+    "account": "sub-one",
+    "cloud": "azure",
+    "name": "vm-two",
+    "reason": "could not tell which VMs are cluster nodes: access denied",
+    "region": "westeurope"
+   }
+  ],
+  "saving": 0,
+  "subscriptions": {
+   "sub-one": "subscription-one"
+  },
+  "today": 0,
+  "unread": [],
+  "vms": []
+ },
+ "started": "Nothing in your cloud was changed."
+}

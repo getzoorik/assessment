@@ -1,21 +1,11 @@
 name: New check, cloud or region
-description: Ask for something the scripts don't cover yet.
+description: Ask for something the assessment doesn't cover yet.
 labels: ["enhancement"]
 body:
   - type: markdown
     attributes:
       value: |
         Every figure in a report comes from the user's cloud, their clusters or a public price list, and is never guessed. So the most helpful request says where the data would come from.
-  - type: dropdown
-    id: script
-    attributes:
-      label: Script
-      options:
-        - k8s.py (Kubernetes)
-        - disks.py (Azure disks)
-        - Both
-    validations:
-      required: true
   - type: dropdown
     id: kind
     attributes:
@@ -32,7 +22,7 @@ body:
     id: request
     attributes:
       label: Describe it
-      description: What should the script read or show, and where in the report? For a missing region or price, name it and copy the reason the report shows today.
+      description: What should the assessment read or show, and where in the report? For a missing region or price, name it and copy the reason the report shows today.
     validations:
       required: true
   - type: textarea
