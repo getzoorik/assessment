@@ -1,0 +1,11 @@
+{
+ "console": {
+  "run": [
+   "Azure: not signed in to Azure; run az login",
+   "AWS: no AWS credentials; run aws configure or aws sso login"
+  ]
+ },
+ "exit": 1,
+ "files": [],
+ "reports": {}
+}

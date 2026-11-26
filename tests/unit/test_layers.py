@@ -111,7 +111,7 @@ class LayerRulesTest(unittest.TestCase):
     def test_one_catch_all_in_cli_and_none_elsewhere(self) -> None:
         """No module catches everything, except cli.py with its one handler for unexpected errors."""
         self.assertEqual(outside(has_catch_all, ("zoorik/cli.py",)), [])
-        self.assertLessEqual(sum(catch_alls(tree) for path, tree in sources() if path == "zoorik/cli.py"), 1)
+        self.assertEqual(sum(catch_alls(tree) for path, tree in sources() if path == "zoorik/cli.py"), 1)
 
 
 class DetectorsTest(unittest.TestCase):

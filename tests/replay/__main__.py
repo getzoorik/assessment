@@ -8,7 +8,6 @@ python -m tests.replay update
 """
 
 import argparse
-import importlib
 import os
 import sys
 import unittest
@@ -17,6 +16,7 @@ from typing import List, Sequence, Tuple
 from tests.replay.golden import UPDATE
 from tests.replay.recording import REPO, Recorder, refuse_inside, save
 from tests.replay.redact import Redactor
+from zoorik.cli import run
 from zoorik.pricing.http import UrllibHttpClient
 from zoorik.system.clock import SystemClock
 from zoorik.system.runtime import real_runtime
@@ -62,7 +62,6 @@ def record(out: str, command: List[str]) -> int:
 
 def run_for_real(argv: List[str]) -> Tuple[Recorder, int]:
     """Run zoorik assess with argv against the clouds you are signed in to, recording it; give the exit code too."""
-    run = importlib.import_module("zoorik.cli").run
     recorder = Recorder(argv, real_runtime(UrllibHttpClient(SystemClock())), Redactor())
     code: int = run(argv, recorder.runtime)
     return recorder, code

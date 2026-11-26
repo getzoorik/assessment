@@ -1,6 +1,8 @@
 """The console: whole lines from any thread, one status line both parts share, and lines held during a question."""
 
 import io
+import os
+import tempfile
 import threading
 import time
 import unittest
@@ -65,6 +67,20 @@ class ConsoleTest(unittest.TestCase):
             self.assertEqual(out.getvalue(), QUESTION)
             out.write("y\n")
         self.assertEqual(out.getvalue(), QUESTION + "y\nRead cluster one.\n")
+
+    def test_a_stop_note_goes_out_at_once_while_a_question_holds_the_lines(self) -> None:
+        """A stop's note reaches the terminal's file descriptor at once, on a line of its own, past the held lines."""
+        with tempfile.TemporaryDirectory() as folder:
+            terminal = os.path.join(folder, "terminal")
+            with open(terminal, "w+", encoding="utf-8") as out:
+                console = Console(out, terminal=False)
+                kubernetes = console.part("Kubernetes")
+                disks = console.part("Disks")
+                with disks.question():
+                    kubernetes.line("Read cluster one.")
+                    console.note("Stopped. Nothing in your cloud was changed.")
+                    out.seek(0)
+                    self.assertEqual(out.read(), "\nStopped. Nothing in your cloud was changed.\n")
 
     def test_each_line_is_whole_under_eight_threads(self) -> None:
         """Eight threads writing at once through a slow stream never mix their lines."""

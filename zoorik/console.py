@@ -1,5 +1,6 @@
 """The run's terminal: whole lines from any thread, one shared status line, and lines held during a question."""
 
+import os
 import threading
 from contextlib import contextmanager
 from typing import Callable, ContextManager, Dict, Iterator, List, TextIO, Tuple
@@ -45,6 +46,14 @@ class Console:
         with self._lock:
             self._erase_status()
             self._progress.clear()
+
+    def note(self, text: str) -> None:
+        """Write the note a stop ends the run with, at once, on a line of its own below the status line or a question.
+
+        A stop's handler runs in the main thread, which may be holding the lock or be inside a write, and the process
+        ends right after it. So the note goes straight to the file descriptor, past the lock and any held lines.
+        """
+        os.write(self._out.fileno(), f"\n{text}\n".encode(self._out.encoding, errors="replace"))
 
     @contextmanager
     def question(self) -> Iterator[None]:

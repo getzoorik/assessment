@@ -54,6 +54,11 @@ class CapturingConsole(Console):
         """Keep lines instead of writing them; there is no terminal, so no status line."""
         super().__init__(io.StringIO(), terminal=False)
         self.lines: Dict[str, List[str]] = {}
+        self.notes: List[str] = []
+
+    def note(self, text: str) -> None:
+        """Keep a stop's note; the real console writes it to the terminal's file descriptor, which a test lacks."""
+        self.notes.append(text)
 
     def _emit(self, part: str, text: str) -> None:
         """Keep the line under its part."""
@@ -127,6 +132,7 @@ class FakeCloud:
         """Answer as scenario says, with the run's temp folder at temp_root and its time on clock."""
         self._installed = scenario.installed
         self._answers = ReplayRunner(scenario.calls, temp_root, clock)
+        self.ended = 0
 
     def run(self, argv: Sequence[str], timeout: float, overrides: Mapping[str, str]) -> Completed:
         """Answer argv from the scenario."""
@@ -135,4 +141,9 @@ class FakeCloud:
         return self._answers.run(argv, timeout, overrides)
 
     def end_children(self) -> None:
-        """End nothing: a scenario starts no program."""
+        """Count the run's ask to end its programs; a scenario starts none."""
+        self.ended += 1
+
+    def unused(self) -> List[str]:
+        """Name the key of each of the scenario's calls the run never made."""
+        return self._answers.unused()

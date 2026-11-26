@@ -171,10 +171,11 @@ def aks_node(name: str) -> Json:
     return record
 
 
-def worked_figure() -> Cluster:
+def worked_figure(window: SampleWindow = WINDOW) -> Cluster:
     """Make five machines; A's eight pods ask 1160m and 1812 MiB each, B's four 1160m and 4372 MiB; all peak at 700m.
 
-    Today three pods fit a machine: A1-A3, A4-A6, A7 A8 B1, B2 B3, and B4. Each pod's peak memory is 1000 MiB.
+    Today three pods fit a machine: A1-A3, A4-A6, A7 A8 B1, B2 B3, and B4. Each pod's peak memory is 1000 MiB, in each
+    of the window's samples.
     """
     layout = {
         "node-1": ["a-1", "a-2", "a-3"],
@@ -208,7 +209,7 @@ def worked_figure() -> Cluster:
         "limitranges": [],
     }
     sample = top(*(f"shop  {name}  app  700m  1000Mi" for names in layout.values() for name in names))
-    return Cluster(objects, (sample,))
+    return Cluster(objects, (sample,) * window.samples)
 
 
 def azure_scenario(name: str, calls: Sequence[Call], fetches: Sequence[Fetch] = ()) -> KubernetesScenario:
@@ -229,18 +230,18 @@ def invoked(scenario: str, name: str, access: Mapping[str, object]) -> Kubernete
 # ---------------------------------------------------------------- AKS scenarios
 
 
-def aks_public() -> KubernetesScenario:
-    """Read a public cluster with kubectl: the worked figure, $730 a month to $438, a saving of $292.
+def aks_public(window: SampleWindow = WINDOW, others: Sequence[Json] = ()) -> KubernetesScenario:
+    """Read a public cluster with kubectl over window: the worked figure, $730 a month to $438, a saving of $292.
 
     Each pod asks 910m and 1300 MiB after step 1, so four fit a machine and the twelve need three; the System pool keeps
     three of its five machines, below its autoscaler's minimum of five. A frees 2000m and 4096 MiB and B 1000m and
-    12288 MiB, so A's share is $134 and B's $158.
+    12288 MiB, so A's share is $134 and B's $158. The subscription's other clusters are others.
     """
     name = "cluster-public"
     pools = [agent_pool("system", "System", 5)]
     record = aks_record(name, agentPoolProfiles=pools, apiServerAccessProfile={"enablePrivateCluster": False})
-    reads = direct_calls(worked_figure(), kubeconfig=kubeconfig("aks", SUB, GROUP, name))
-    return azure_scenario("aks-public", [aks_list(record), credentials(name), *reads], (MACHINE_PRICES,))
+    reads = direct_calls(worked_figure(window), kubeconfig=kubeconfig("aks", SUB, GROUP, name))
+    return azure_scenario("aks-public", [aks_list(record, *others), credentials(name), *reads], (MACHINE_PRICES,))
 
 
 def aks_private() -> KubernetesScenario:
@@ -347,11 +348,11 @@ def app_pod(namespace: str, name: str, machine: str, request: Tuple[str, str], c
     return pod(namespace, name, machine, [container("app", requests)], owners=[owner(*controller)])
 
 
-def node_kinds() -> Cluster:
+def node_kinds(window: SampleWindow = WINDOW) -> Cluster:
     """Make a cluster with a node of each kind, and one pod on each machine but the Fargate node, which has its own.
 
-    web's pods ask 500m and 1 GiB and peak at 100m and 200 MiB; worker's ask as much and peak at 200m and 400 MiB.
-    report and tools have no reading, so they keep their requests.
+    web's pods ask 500m and 1 GiB and peak at 100m and 200 MiB; worker's ask as much and peak at 200m and 400 MiB, in
+    each of the window's samples. report and tools have no reading, so they keep their requests.
     """
     group = "eks.amazonaws.com/nodegroup"
     on_demand = {TYPE_LABEL: "m6i.large", group: "apps-on-demand", "eks.amazonaws.com/capacityType": "ON_DEMAND"}
@@ -400,7 +401,7 @@ def node_kinds() -> Cluster:
         "shop  worker-1  app  200m  400Mi",
         "shop  worker-2  app  200m  400Mi",
     )
-    return Cluster(objects, (sample,))
+    return Cluster(objects, (sample,) * window.samples)
 
 
 def product(machine_type: str, price: str) -> str:
@@ -455,13 +456,13 @@ def aws_scenario(name: str, calls: Sequence[Call], regions: Sequence[str] = (EU,
 # ---------------------------------------------------------------- EKS scenarios
 
 
-def eks_node_kinds() -> KubernetesScenario:
+def eks_node_kinds(window: SampleWindow = WINDOW, others: Sequence[Json] = ()) -> KubernetesScenario:
     """Read an EKS cluster with kubectl: managed on-demand and spot groups, a self-managed group, Karpenter and Fargate.
 
     Each kind of node is its own pool, priced as it is bought. web's and worker's pods each fit one machine of their
     group after step 1, so each group drops one: $73 and $29 a month, so $379 goes to $277. The Fargate node is counted,
     and its pod left out. Only the self-managed node carries no provisioner's label, so the region's instances are read
-    for it: it is spot, in the Auto Scaling group workers-self.
+    for it: it is spot, in the Auto Scaling group workers-self. The region's other instances are others.
     """
     name = "cluster-eks"
     worker = {
@@ -473,8 +474,8 @@ def eks_node_kinds() -> KubernetesScenario:
         eks_cluster(name),
         *node_groups(name, [("apps-on-demand", "ON_DEMAND"), ("apps-spot", "SPOT")]),
         update_kubeconfig(name),
-        *direct_calls(node_kinds(), kubeconfig=kubeconfig("eks", EU, name)),
-        aws_call(instances_args(EU), {"Reservations": [{"ReservationId": "r-01", "Instances": [worker]}]}),
+        *direct_calls(node_kinds(window), kubeconfig=kubeconfig("eks", EU, name)),
+        aws_call(instances_args(EU), {"Reservations": [{"ReservationId": "r-01", "Instances": [worker, *others]}]}),
         *ec2_prices(),
     ]
     return aws_scenario("eks-node-kinds", calls)
