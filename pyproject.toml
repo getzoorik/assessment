@@ -58,22 +58,24 @@ name = "Each layer imports only the layers below it"
 type = "layers"
 layers = [
   "zoorik.report",
+  "zoorik.pricing",
+  "zoorik.cloud",
   "zoorik.system",
   "zoorik.console | zoorik.format | zoorik.output",
   "zoorik.errors",
 ]
 
 [[tool.importlinter.contracts]]
-name = "Only the runtime holds the command runner"
+name = "Only the runtime and the cloud readers hold the command runner"
 type = "protected"
 protected_modules = ["zoorik.system.process"]
-allowed_importers = ["zoorik.system.runtime"]
+allowed_importers = ["zoorik.system.runtime", "zoorik.cloud"]
 
 [[tool.importlinter.contracts]]
-name = "Only the runtime holds the HTTP client"
+name = "Only the runtime, the cloud readers and the price lists hold the HTTP client"
 type = "protected"
 protected_modules = ["zoorik.system.http"]
-allowed_importers = ["zoorik.system.runtime"]
+allowed_importers = ["zoorik.system.runtime", "zoorik.cloud", "zoorik.pricing"]
 
 [[tool.importlinter.contracts]]
 name = "Only the report draws the PDF"

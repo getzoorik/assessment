@@ -131,6 +131,16 @@ class DetectorsTest(unittest.TestCase):
         tree = ast.parse('run(["az", "account", "show"])\nARGV = ("kubectl", "top", "pods")\nn = [1, 2]')
         self.assertEqual(argv_heads(tree), {"az", "kubectl"})
 
+    def test_each_rule_finds_the_modules_it_allows(self) -> None:
+        """The runner, the HTTP policy and both cloud readers are found, so each rule checks real code."""
+        found = {path: tree for path, tree in sources()}
+        self.assertEqual([path for path, tree in found.items() if starts_programs(tree)], ["zoorik/system/process.py"])
+        self.assertEqual([path for path, tree in found.items() if makes_http_calls(tree)], ["zoorik/pricing/http.py"])
+        self.assertEqual(
+            [path for path, tree in found.items() if builds_cloud_commands(tree)],
+            ["zoorik/cloud/aws.py", "zoorik/cloud/azure.py"],
+        )
+
     def test_catch_alls_are_counted(self) -> None:
         """A bare except, except Exception and except BaseException count, alone or in a tuple."""
         handlers = ["", " Exception", " BaseException", " (KeyError, Exception)", " KeyError", " (KeyError, OSError)"]

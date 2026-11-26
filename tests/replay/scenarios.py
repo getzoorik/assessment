@@ -1,11 +1,13 @@
 """Made-up runs for replay tests, with neutral names."""
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import FrozenSet, Optional, Sequence
 
 from tests.replay.recording import Call, Fetch, RunFacts
 from zoorik.system.env import EnvFacts
+from zoorik.system.process import Completed
 
 
 @dataclass(frozen=True)
@@ -30,3 +32,14 @@ FACTS = RunFacts(
 
 # Neither cloud CLI is installed.
 NO_CLI = Scenario(name="no-cli", facts=FACTS, installed=frozenset(), calls=(), fetches=(), answers=())
+
+
+def call(argv: Sequence[str], stdout: str = "", *, exit_code: int = 0, stderr: str = "") -> Call:
+    """Make a made-up call and its answer: argv as the program gets it, with the temporary folder as <temp>."""
+    return Call(
+        key=json.dumps(list(argv)),
+        argv=list(argv),
+        outcome=Completed(exit_code, stdout, stderr),
+        files={},
+        seconds=0.0,
+    )

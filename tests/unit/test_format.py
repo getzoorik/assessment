@@ -2,11 +2,11 @@
 
 import unittest
 
-from zoorik.format import count, half_up, usd
+from zoorik.format import cents, count, half_up, usd
 
 
 class FormatTest(unittest.TestCase):
-    """half_up, usd and count."""
+    """half_up, usd, count and cents."""
 
     def test_half_up_sends_halves_up(self) -> None:
         """Halves go up, where round() would send them to the even number."""
@@ -25,4 +25,10 @@ class FormatTest(unittest.TestCase):
         self.assertEqual(
             [count(0, "machine"), count(1, "machine"), count(2, "machine"), count(1200, "machine")],
             ["0 machines", "1 machine", "2 machines", "1,200 machines"],
+        )
+
+    def test_cents_rounds_halves_up(self) -> None:
+        """Dollars round to whole cents with halves up, even where the float sits just below the half."""
+        self.assertEqual(
+            [cents(0.125), cents(2.675), cents(38.763), cents(19.71), cents(0.0)], [0.13, 2.68, 38.76, 19.71, 0.0]
         )
