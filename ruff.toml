@@ -1,4 +1,15 @@
 target-version = "py38"
+line-length = 120
+# The root scripts and the old entry point keep today's form until the package replaces them.
+extend-exclude = ["k8s.py", "disks.py", "zoorik/__main__.py"]
 
 [lint]
-select = ["E4", "E7", "E9", "F"]
+select = ["E", "W", "F", "I", "N", "D", "C90", "B", "UP", "SIM", "PL", "RUF"]
+# The exception names state the failure (ToolNotInstalled, PriceNotFound), so they carry no Error suffix.
+ignore = ["N818"]
+
+[lint.pydocstyle]
+convention = "pep257"
+
+[lint.mccabe]
+max-complexity = 10

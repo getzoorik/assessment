@@ -1,0 +1,2 @@
+# Checkouts keep the goldens' LF line ends on every system, Windows included.
+tests/replay/goldens/** -text

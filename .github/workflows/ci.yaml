@@ -46,6 +46,8 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python }}
+      - name: Unit tests and replays
+        run: python -m unittest discover -s tests -t .
       - name: Compile both scripts
         run: python -m py_compile k8s.py disks.py
       - name: Both scripts print their help and version
@@ -113,12 +115,26 @@ jobs:
           npm pack
           npx --yes --package "./zoorik-$(node -p "require('./package.json').version").tgz" zoorik --version | grep -E '^zoorik [0-9]'
 
-  ruff:
-    name: Ruff
+  lint:
+    name: Lint
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Lint
-        run: pipx run --spec ruff==0.16.10 ruff check --output-format=github .
+      # The pinned mypy runs on Python 3.9 to 3.13, and import-linter on 3.11 or later.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - name: Install the pinned tools
+        run: python -m pip install -r requirements-dev.txt
+      - name: Ruff
+        run: ruff check --output-format=github .
+      - name: Ruff format
+        run: ruff format --check .
+      - name: mypy, Linux
+        run: mypy --platform linux
+      - name: mypy, Windows
+        run: mypy --platform win32
+      - name: Import layers
+        run: lint-imports --no-cache
